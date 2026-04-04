@@ -70,4 +70,4 @@ python scripts\run_prompt_suite.py
 
 ## License
 
-This repository is private and distributed under a proprietary license. See [LICENSE](C:/Users/MSUSERSL123/opt/unique%20idea/Shree%20Core/LICENSE) for details.
+This repository is private and distributed under a proprietary license. See [LICENSE](./LICENSE) for details.
