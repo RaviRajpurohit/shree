@@ -1,79 +1,187 @@
-# Shree
+# 🧠 Shree (श्री) – Offline Personal AI Agent
 
-Shree is a Python-based offline AI agent that parses user commands, routes them to local plugins, remembers usage patterns, and offers lightweight context-aware suggestions.
+> A privacy-first, offline AI agent that learns from user behavior and executes real-world actions on your system.
 
-## Features
+---
 
-- Offline-first intent routing with rule-based parsing and LLM fallback
-- Offline basic knowledge handling for identity, greetings, time, date, and help without using the LLM
-- Local plugin execution for actions like opening apps, web search, reminders, music, and browser control
-- Memory-backed features such as command history, suggestions, and explainable suggestions
-- Context-aware follow-up handling such as `open new tab` and `play next`
-- Prompt suite and unit tests for regression coverage
+## 🚀 Introduction
 
-## Project Structure
+Shree (श्री) is an offline-first personal AI agent designed to run directly on your device.
 
-- `main.py`: interactive CLI entry point
-- `core/`: agent loop, routing, memory, executor, and intent logic
-- `plugins/`: action plugins
-- `llm/`: offline LLM client integration
-- `scripts/`: prompt-suite and utility scripts
-- `tests/`: unit tests
-- `reports/`: generated prompt test reports
-- `logs/`: runtime logs
+Unlike traditional AI assistants that rely heavily on cloud-based LLMs, Shree focuses on:
 
-## Requirements
+* ⚡ Execution over conversation
+* 🧠 Personalization over general intelligence
+* 🔒 Privacy over connectivity
 
-- Python 3.11+ recommended
-- Windows environment recommended for current app-opening and media-control plugins
+Shree acts as a system-level assistant that can:
 
-Install dependencies:
+* Open applications
+* Execute system commands
+* Manage reminders
+* Play music
+* Search locally/web
+* Learn user behavior over time
 
-```powershell
-pip install -r requirements.txt
+---
+
+## ⚙️ Key Features
+
+* ✅ Offline-first architecture
+* ✅ Plugin-based execution system
+* ✅ Rule-based intent engine (fast & reliable)
+* ✅ Multi-command chaining (early agent capability)
+* ✅ Persistent memory (behavior tracking)
+* ✅ Suggestion engine (based on usage patterns)
+* ✅ Safe system command execution
+
+---
+
+## 🧠 Vision
+
+Shree is not just an assistant — it is a learning system.
+
+Inspired by how humans learn from their environment, Shree is designed to:
+
+* Observe user behavior
+* Learn patterns over time
+* Adapt to individual usage
+* Become unique for every user
+
+### 🎯 Goal
+
+> Build a fully offline, privacy-first AI agent that evolves with its user.
+
+---
+
+## 🏗️ Architecture
+
+```
+User Input
+   ↓
+Intent Router (Rule Engine → LLM Fallback)
+   ↓
+Action Schema
+   ↓
+Executor
+   ↓
+Plugin System
+   ↓
+Memory Update
+   ↓
+Suggestion Engine
 ```
 
-## Run
+---
 
-```powershell
-python main.py
+## 🔌 Plugins
+
+Shree uses a modular plugin system:
+
+* `OpenAppPlugin` → Open applications
+* `CreateReminderPlugin` → Manage reminders
+* `PlayMusicPlugin` → Play music
+* `SearchWebPlugin` → Search queries
+* `RunCommandPlugin` → Execute terminal commands
+* `SystemControlPlugin` → Shutdown / restart / lock
+
+---
+
+## 🧠 Memory System
+
+Shree stores user interactions to learn behavior:
+
+* Tracks frequently used commands
+* Stores recent command history
+* Generates smart suggestions
+
+Example:
+
+```
+You usually open Chrome. Want me to?
 ```
 
-Example commands:
+---
 
-- `open chrome`
-- `open new tab`
-- `open chrome with new tab`
-- `play hanuman chalisa`
-- `play next`
-- `show my last commands`
-- `why did you suggest chrome`
+## 🧪 Example Commands
 
-Exit with:
-
-```text
-exit
+```
+open chrome
+play hanuman chalisa
+create reminder for tomorrow 6am
+open chrome and search youtube
+open terminal and execute dir
+shutdown system
 ```
 
-## Tests
+---
 
-Run unit tests:
+## ⚠️ Current Limitations
 
-```powershell
-python -m unittest discover -s tests -p "test_*.py" -v
-```
+* Limited context awareness
+* Suggestion engine is frequency-based
+* LLM fallback is unstable (offline-first priority)
+* No long-term behavioral learning yet
 
-Run the prompt suite:
+---
 
-```powershell
-python scripts\run_prompt_suite.py
-```
+## 🔮 Roadmap
 
-The prompt suite runs in snapshot mode:
-- it replaces app, browser, music, reminder, and system-action plugins with safe test doubles
-- it keeps basic queries such as `who are you`, `what is time`, `what is date`, greetings, and help fully offline
-- it writes a Markdown report to `reports/` and prints the generated report path
+### Phase 1 (Completed ✅)
 
-## License
+* Rule engine
+* Plugin system
+* Basic memory
+* Command execution
 
-This repository is private and distributed under a proprietary license. See [LICENSE](./LICENSE) for details.
+### Phase 2 (In Progress 🚧)
+
+* Context-aware execution
+* Command normalization
+* Improved suggestions
+
+### Phase 3 (Next 🚀)
+
+* Sequence-based learning
+* Shree Brain (planner system)
+* Intelligent task chaining
+
+### Phase 4 (Future 🔥)
+
+* Voice commands
+* Multi-device sync
+* Personalized AI behavior
+
+---
+
+## 💡 Philosophy
+
+Shree is built on three core principles:
+
+### 1. 🔒 Privacy First
+
+No data leaves your device.
+
+### 2. ⚡ Execution First
+
+Actions matter more than conversation.
+
+### 3. 🧠 Learning First
+
+Every user gets a unique AI experience.
+
+---
+
+## 🤝 Contributing
+
+This is an evolving project. Contributions, ideas, and feedback are welcome.
+
+---
+
+## ⭐ Final Thought
+
+Shree is not trying to compete with cloud AI.
+
+It is building something different:
+
+> A personal AI that lives with you, learns from you, and works for you — completely offline.
