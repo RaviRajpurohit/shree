@@ -330,16 +330,23 @@ def resolve_command_snapshot(agent, command):
             "source": "offline_knowledge",
             "action": "offline_response",
             "resource": normalize_text_for_report(command),
+            "plan": [],
             "response": offline_response,
         }
 
     action_schema = normalize(agent.intent_router.route(command))
+    plan = []
+
+    if action_schema and not is_non_executable_action(action_schema):
+        plan = agent.planner_engine.build_plan(action_schema)
+
     response = agent.process(command)
 
     return {
         "source": get_result_source(action_schema),
         "action": get_result_action(action_schema),
         "resource": get_result_resource(action_schema),
+        "plan": plan,
         "response": response,
     }
 
@@ -354,10 +361,21 @@ def run_test_case(agent, command):
         "source": snapshot["source"],
         "action": snapshot["action"],
         "resource": snapshot["resource"],
+        "plan": snapshot["plan"],
         "response": snapshot["response"],
         "suggestion_before": suggestion_before,
         "suggestion_after": suggestion_after,
     }
+
+
+def is_non_executable_action(action_schema):
+    if isinstance(action_schema, list):
+        return False
+
+    if not isinstance(action_schema, dict):
+        return False
+
+    return action_schema.get("action") in {"show_history", "explain_suggestion"}
 
 
 def get_result_source(action_schema):
@@ -444,6 +462,23 @@ def normalize_text_for_report(text):
     return " ".join(str(text or "").strip().lower().split())
 
 
+def format_plan_steps(plan):
+    if not plan:
+        return ["- Execution plan: None"]
+
+    lines = ["- Execution plan:"]
+
+    for step in plan:
+        lines.append(
+            "  "
+            + f"step {step.get('step')}: "
+            + f"{step.get('action')} -> {step.get('resource')} "
+            + f"{step.get('parameters', {})}"
+        )
+
+    return lines
+
+
 def build_report(results, suggestion_results, report_path):
     status_counter = Counter(classify_result(result) for result in results)
     category_counter = Counter(result["category"] for result in results)
@@ -491,6 +526,7 @@ def build_report(results, suggestion_results, report_path):
                     f"- Source: {result['source']}",
                     f"- Action: {result['action']}",
                     f"- Resource: {result['resource']}",
+                    *format_plan_steps(result["plan"]),
                     f"- Suggestion before: {result['suggestion_before'] or 'None'}",
                     f"- Response: {result['response']}",
                     f"- Suggestion after: {result['suggestion_after'] or 'None'}",
@@ -516,6 +552,7 @@ def build_report(results, suggestion_results, report_path):
             [
                 f"### {result['command']}",
                 "",
+                *format_plan_steps(result["plan"]),
                 f"- Suggestion before: {result['suggestion_before'] or 'None'}",
                 f"- Response: {result['response']}",
                 f"- Suggestion after: {result['suggestion_after'] or 'None'}",

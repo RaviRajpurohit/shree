@@ -6,6 +6,7 @@ from core.memory import Memory
 from core.memory_manager import MemoryManager
 from core.normalizer import normalize
 from core.offline_knowledge_engine import OfflineKnowledgeEngine
+from core.planner_engine import PlannerEngine
 from core.suggestion_engine import SuggestionEngine
 from core.executor import Executor
 from plugins.plugin_manager import PluginManager
@@ -22,6 +23,7 @@ class AgentLoop:
         self.memory = Memory()
         self.memory_manager = MemoryManager()
         self.offline_knowledge_engine = OfflineKnowledgeEngine()
+        self.planner_engine = PlannerEngine()
         self.intent_router = IntentRouter(self.intent_engine, self.memory)
         self.plugin_manager = PluginManager()
         self.executor = Executor(self.plugin_manager)
@@ -46,10 +48,17 @@ class AgentLoop:
         LOGGER.info("Resolved action schema: %s", action_schema)
 
         if isinstance(action_schema, list):
-            response = self.executor.execute(action_schema)
+            execution_plan = self.planner_engine.build_plan(action_schema)
+
+            if not execution_plan:
+                LOGGER.warning("PlannerEngine did not produce any executable steps for input: %s", user_input)
+                return "Sorry, I couldn't understand."
+
+            LOGGER.info("Execution plan: %s", execution_plan)
+            response = self.executor.execute(execution_plan)
             LOGGER.info("Execution response: %s", response)
 
-            for action in action_schema:
+            for action in execution_plan:
                 self.memory.remember(user_input, action)
                 self.memory.update_last_action(action)
                 self.record_successful_action(action, response)
@@ -71,12 +80,21 @@ class AgentLoop:
             target = action_schema.get("parameters", {}).get("target")
             return self.memory.explain_suggestion(target)
 
-        response = self.executor.execute(action_schema)
+        execution_plan = self.planner_engine.build_plan(action_schema)
+
+        if not execution_plan:
+            LOGGER.warning("PlannerEngine did not produce any executable steps for input: %s", user_input)
+            return "Sorry, I couldn't understand."
+
+        LOGGER.info("Execution plan: %s", execution_plan)
+        response = self.executor.execute(execution_plan)
         LOGGER.info("Execution response: %s", response)
 
-        self.memory.remember(user_input, action_schema)
-        self.memory.update_last_action(action_schema)
-        self.record_successful_action(action_schema, response)
+        for action in execution_plan:
+            self.memory.remember(user_input, action)
+            self.memory.update_last_action(action)
+            self.record_successful_action(action, response)
+
         self.suggestion_engine.update_after_command()
 
         suggested_command = ""

@@ -20,6 +20,7 @@ from core.memory import Memory
 from core.memory_manager import MemoryManager
 from core.normalizer import normalize
 from core.offline_knowledge_engine import OfflineKnowledgeEngine
+from core.planner_engine import PlannerEngine
 from core.intent_router import IntentRouter
 from core.suggestion_engine import SuggestionEngine
 from plugins.base_plugin import BasePlugin
@@ -88,6 +89,56 @@ class CrashingRunCommandPlugin(BasePlugin):
 
 
 class ShreeFeatureTests(unittest.TestCase):
+    def test_planner_engine_wraps_single_action_with_step_number(self):
+        planner = PlannerEngine()
+
+        plan = planner.build_plan(
+            {
+                "action": "open",
+                "resource": "chrome",
+                "device": "local",
+                "parameters": {"name": "chrome"},
+            }
+        )
+
+        self.assertEqual(
+            plan,
+            [
+                {
+                    "step": 1,
+                    "action": "open",
+                    "resource": "chrome",
+                    "device": "local",
+                    "parameters": {"name": "chrome"},
+                }
+            ],
+        )
+
+    def test_planner_engine_keeps_action_list_and_adds_step_numbers(self):
+        planner = PlannerEngine()
+
+        plan = planner.build_plan(
+            [
+                {
+                    "action": "open",
+                    "resource": "chrome",
+                    "device": "local",
+                    "parameters": {"name": "chrome"},
+                },
+                {
+                    "action": "run_command",
+                    "resource": "terminal",
+                    "device": "local",
+                    "parameters": {"command": "clear"},
+                },
+            ]
+        )
+
+        self.assertEqual(plan[0]["step"], 1)
+        self.assertEqual(plan[0]["action"], "open")
+        self.assertEqual(plan[1]["step"], 2)
+        self.assertEqual(plan[1]["action"], "run_command")
+
     def test_offline_knowledge_engine_handles_identity_query(self):
         engine = OfflineKnowledgeEngine()
 
@@ -396,6 +447,36 @@ class ShreeFeatureTests(unittest.TestCase):
 
         mock_detect.assert_not_called()
         self.assertIn("opening apps", response)
+
+    def test_agent_loop_builds_execution_plan_before_executor(self):
+        agent = AgentLoop()
+        agent.plugin_manager.plugins["open"] = DummyOpenPlugin()
+
+        planned_steps = [
+            {
+                "step": 1,
+                "action": "open",
+                "resource": "chrome",
+                "device": "local",
+                "parameters": {"name": "chrome"},
+            }
+        ]
+
+        with patch.object(
+            agent.intent_router,
+            "route",
+            return_value={
+                "action": "open",
+                "resource": "chrome",
+                "device": "local",
+                "parameters": {"name": "chrome"},
+            },
+        ):
+            with patch.object(agent.planner_engine, "build_plan", return_value=planned_steps) as mock_plan:
+                response = agent.process("open chrome")
+
+        mock_plan.assert_called_once()
+        self.assertEqual(response, "chrome opened [test]")
 
     def test_intent_engine_scores_fuzzy_rule_match(self):
         engine = AgentLoop().intent_engine

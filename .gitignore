@@ -40,3 +40,5 @@ reports/*.md
 # Environment files
 .env
 .env.*
+
+memory.json
