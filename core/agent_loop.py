@@ -1,9 +1,11 @@
 import logging
-from datetime import datetime
 
 from core.intent_engine import IntentEngine
 from core.intent_router import IntentRouter
 from core.memory import Memory
+from core.memory_manager import MemoryManager
+from core.normalizer import normalize
+from core.offline_knowledge_engine import OfflineKnowledgeEngine
 from core.suggestion_engine import SuggestionEngine
 from core.executor import Executor
 from plugins.plugin_manager import PluginManager
@@ -18,23 +20,24 @@ class AgentLoop:
 
         self.intent_engine = IntentEngine()
         self.memory = Memory()
+        self.memory_manager = MemoryManager()
+        self.offline_knowledge_engine = OfflineKnowledgeEngine()
         self.intent_router = IntentRouter(self.intent_engine, self.memory)
         self.plugin_manager = PluginManager()
         self.executor = Executor(self.plugin_manager)
-        self.suggestion_engine = SuggestionEngine(self.memory)
+        self.suggestion_engine = SuggestionEngine(self.memory, self.memory_manager)
 
     def process(self, user_input):
         LOGGER.info("User input received: %s", user_input)
 
         normalized_input = " ".join(user_input.lower().split())
+        offline_response = self.offline_knowledge_engine.respond(user_input)
 
-        action_schema = self.intent_router.route(user_input)
+        if offline_response:
+            LOGGER.info("Resolved with OfflineKnowledgeEngine: %s", offline_response)
+            return offline_response
 
-        fallback_response = self.handle_basic_queries(user_input, action_schema)
-
-        if fallback_response:
-            LOGGER.info("Resolved with offline smart answer: %s", fallback_response)
-            return fallback_response
+        action_schema = normalize(self.intent_router.route(user_input))
 
         if not action_schema:
             LOGGER.warning("No action schema could be created for input: %s", user_input)
@@ -49,7 +52,9 @@ class AgentLoop:
             for action in action_schema:
                 self.memory.remember(user_input, action)
                 self.memory.update_last_action(action)
+                self.record_successful_action(action, response)
 
+            self.suggestion_engine.update_after_command()
             return response
 
         if action_schema.get("action") == "show_history":
@@ -71,32 +76,21 @@ class AgentLoop:
 
         self.memory.remember(user_input, action_schema)
         self.memory.update_last_action(action_schema)
+        self.record_successful_action(action_schema, response)
+        self.suggestion_engine.update_after_command()
 
-        if normalized_input == self.memory.last_suggested_command:
+        suggested_command = ""
+
+        if self.memory.last_suggestion_reason:
+            suggested_command = self.memory.last_suggestion_reason.get("command", "")
+
+        if normalized_input == suggested_command:
             self.memory.last_suggested_command = None
             self.memory.last_suggested_count = 0
+            self.memory.last_suggestion_reason = None
+            self.suggestion_engine.clear_suggestion()
 
         return response
-
-    def handle_basic_queries(self, user_input, action_schema):
-        if not action_schema or isinstance(action_schema, list):
-            return None
-
-        if action_schema.get("action") != "unknown":
-            return None
-
-        text = user_input.lower()
-
-        if "who are you" in text:
-            return "I am Shree, your offline AI assistant."
-
-        if "date" in text:
-            return datetime.now().strftime("%d %B %Y")
-
-        if "time" in text:
-            return datetime.now().strftime("%H:%M")
-
-        return None
 
     def get_suggestion(self):
         suggestion = self.suggestion_engine.get_suggestion()
@@ -108,3 +102,40 @@ class AgentLoop:
 
     def get_memory_summary(self):
         return self.memory.summarize()
+
+    def record_successful_action(self, action_schema, response):
+        if not self._should_record_action(action_schema, response):
+            return
+
+        self.memory_manager.record_action(
+            action_schema.get("action"),
+            action_schema.get("resource", ""),
+        )
+
+    @staticmethod
+    def _should_record_action(action_schema, response):
+        if not isinstance(action_schema, dict):
+            return False
+
+        action = action_schema.get("action")
+
+        if action in {None, "", "unknown", "show_history", "explain_suggestion"}:
+            return False
+
+        normalized_response = str(response or "").strip().lower()
+
+        failure_markers = (
+            "i don't know how to perform that action",
+            "invalid command format",
+            "missing action in command",
+            "couldn't understand",
+            "llm unavailable",
+            "please specify",
+            "could not find",
+            "confirmation required before",
+            "that request looks like a control command",
+            "unsupported",
+            "something went wrong while executing",
+        )
+
+        return not any(marker in normalized_response for marker in failure_markers)

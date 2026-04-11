@@ -18,45 +18,171 @@ class IntentRouter:
         "firefox browser": "firefox",
     }
     RESERVED_OPEN_TERMS = ("tab", "next", "previous")
+    CHAIN_SEPARATORS = ("and", "with", "then")
+    RULE_ENGINE_KEYWORDS = ("open", "play", "search")
+    FILE_OPEN_NOISE_PREFIXES = (
+        "hello ",
+        "hi ",
+        "hey ",
+        "please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "kindly ",
+        "shree ",
+    )
 
     def __init__(self, intent_engine, memory=None):
         self.intent_engine = intent_engine
         self.memory = memory
 
     def route(self, user_input):
+        chained_intent = self._resolve_chained_intent(user_input)
+
+        if chained_intent:
+            LOGGER.info("Intent router resolved chained command: %s", user_input)
+            return chained_intent
+
+        return self._route_single_intent(user_input)
+
+    def _route_single_intent(self, user_input):
         pattern_intent = self._resolve_pattern_intent(user_input)
 
         if pattern_intent:
-            self.attach_source(pattern_intent, "pattern")
+            self.attach_metadata(pattern_intent, "pattern", 1.0)
             LOGGER.info("Pattern matched")
             return pattern_intent
 
         contextual_intent = self._resolve_contextual_intent(user_input)
 
         if contextual_intent:
-            self.attach_source(contextual_intent, "context")
+            self.attach_metadata(contextual_intent, "context", 1.0)
             LOGGER.info("Intent router used memory context for input: %s", user_input)
             return contextual_intent
 
-        local_intent = self.intent_engine.parse_local_intent(user_input)
-        local_intent = self._prevent_wrong_routing(local_intent)
+        rule_result = self.intent_engine.parse_local_intent_with_confidence(user_input)
+        local_intent = self._prevent_wrong_routing(rule_result.get("intent"))
+        confidence = rule_result.get("confidence", 0.0)
 
-        if local_intent:
-            self.attach_source(local_intent, "rule")
-            LOGGER.info("Intent router selected rule engine for input: %s", user_input)
+        if local_intent and confidence > 0.8:
+            self.attach_metadata(local_intent, "rule", confidence)
+            LOGGER.info(
+                "Intent router selected rule engine for input: %s with confidence %.2f",
+                user_input,
+                confidence,
+            )
             return local_intent
+
+        if local_intent and confidence > 0.5:
+            clarification = self._build_clarification_action(rule_result, confidence)
+            self.attach_metadata(clarification, "rule", confidence)
+            LOGGER.info(
+                "Intent router requesting clarification for input: %s with confidence %.2f",
+                user_input,
+                confidence,
+            )
+            return clarification
 
         LOGGER.info("Intent router falling back to LLM for input: %s", user_input)
         llm_intent = self.intent_engine.detect_intent(user_input)
         llm_intent = self._prevent_wrong_routing(llm_intent)
 
         if llm_intent:
-            self.attach_source(llm_intent, "llm")
+            self.attach_metadata(llm_intent, "llm", 0.0)
             LOGGER.info("LLM returned action schema: %s", llm_intent)
 
         return llm_intent
 
+    def _should_force_rule_engine(self, user_input):
+        text = clean_input(user_input)
+
+        if not text:
+            return False
+
+        tokens = set(text.split())
+        return any(keyword in tokens for keyword in self.RULE_ENGINE_KEYWORDS)
+
+    def _resolve_chained_intent(self, user_input):
+        parts = self._split_chained_input(user_input)
+
+        if len(parts) < 2:
+            return None
+
+        actions = []
+        chain_context = {}
+
+        for part in parts:
+            action_schema = self._route_single_intent(part)
+
+            if not action_schema or isinstance(action_schema, list):
+                return None
+
+            action_schema = self._apply_chain_context(action_schema, chain_context)
+            actions.append(action_schema)
+            chain_context = self._update_chain_context(chain_context, action_schema)
+
+        self.attach_metadata(actions, "pattern", 1.0)
+        return actions
+
+    def _split_chained_input(self, user_input):
+        text = clean_input(user_input)
+
+        if not text:
+            return []
+
+        separator_pattern = r"\b(?:and|with|then)\b"
+        parts = [part.strip() for part in re.split(separator_pattern, text) if part.strip()]
+
+        if len(parts) < 2:
+            return []
+
+        return parts
+
+    def _apply_chain_context(self, action_schema, chain_context):
+        if action_schema.get("action") == "open":
+            browser = self._extract_browser_name(action_schema.get("resource", ""))
+
+            if browser:
+                action_schema["resource"] = browser
+                action_schema.setdefault("parameters", {})
+                action_schema["parameters"]["name"] = browser
+
+        if action_schema.get("action") != "browser_control":
+            return action_schema
+
+        parameters = action_schema.setdefault("parameters", {})
+        browser = parameters.get("browser")
+
+        if browser and browser != "default":
+            return action_schema
+
+        if chain_context.get("browser"):
+            parameters["browser"] = chain_context["browser"]
+
+        return action_schema
+
+    def _update_chain_context(self, chain_context, action_schema):
+        updated_context = dict(chain_context)
+
+        browser = self._extract_browser_name(action_schema.get("resource", ""))
+
+        if action_schema.get("action") == "open" and browser:
+            updated_context["browser"] = browser
+        elif action_schema.get("action") == "browser_control":
+            browser = action_schema.get("parameters", {}).get("browser")
+
+            if browser and browser != "default":
+                updated_context["browser"] = browser
+
+        return updated_context
+
     def _resolve_pattern_intent(self, user_input):
+        file_intent = self._parse_open_file_intent(user_input)
+
+        if file_intent:
+            LOGGER.info("File open pattern matched")
+            return file_intent
+
         text = clean_input(user_input)
 
         if not text:
@@ -74,6 +200,32 @@ class IntentRouter:
             return browser_control
 
         return None
+
+    def _parse_open_file_intent(self, user_input):
+        text = self._normalize_file_command_text(user_input)
+
+        if not text:
+            return None
+
+        match = re.match(
+            r"^open\s+file(?:\s+called)?\s+(?P<name>.+?)$",
+            text,
+            re.IGNORECASE,
+        )
+
+        if not match:
+            return None
+
+        file_name = match.group("name").strip().strip("\"'")
+
+        if not file_name:
+            return None
+
+        return self._build_action(
+            "open_file",
+            file_name,
+            {"name": file_name},
+        )
 
     def _parse_open_with_browser_control(self, text):
         match = re.match(
@@ -221,12 +373,48 @@ class IntentRouter:
             "parameters": parameters or {},
         }
 
-    def attach_source(self, action_schema, source):
+    def _normalize_file_command_text(self, user_input):
+        text = " ".join(str(user_input or "").strip().split())
+
+        if not text:
+            return ""
+
+        lowered_text = text.lower()
+
+        for prefix in self.FILE_OPEN_NOISE_PREFIXES:
+            if lowered_text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                lowered_text = text.lower()
+
+        return text
+
+    def _build_clarification_action(self, rule_result, confidence):
+        candidate_command = (rule_result.get("candidate_command") or "").strip()
+
+        if candidate_command:
+            message = f"Did you mean '{candidate_command}'?"
+        else:
+            message = "I found a partial match. Could you clarify the command?"
+
+        return self._build_action(
+            "unknown",
+            "",
+            {
+                "message": message,
+                "clarification_needed": True,
+                "candidate_command": candidate_command,
+                "confidence": confidence,
+            },
+        )
+
+    def attach_metadata(self, action_schema, source, confidence):
         if isinstance(action_schema, list):
             for action in action_schema:
                 action.setdefault("metadata", {})
                 action["metadata"]["source"] = source
+                action["metadata"]["confidence"] = confidence
             return
 
         action_schema.setdefault("metadata", {})
         action_schema["metadata"]["source"] = source
+        action_schema["metadata"]["confidence"] = confidence

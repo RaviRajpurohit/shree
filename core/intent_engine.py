@@ -1,20 +1,29 @@
 import json
 import logging
 import re
+from difflib import get_close_matches
 
 from llm.ollama_client import generate
 
 
 LOGGER = logging.getLogger(__name__)
 
+REQUIRED_INTENT_KEYS = ("action", "resource", "device", "parameters")
+
 
 def clean_input(text: str) -> str:
     cleaned = text.lower()
 
     filler_patterns = [
+        r"\bhello\b",
+        r"\bhi\b",
+        r"\bhii+\b",
+        r"\bhey there\b",
         r"\bplease\b",
         r"\bcan you\b",
         r"\bcould you\b",
+        r"\bwould you\b",
+        r"\bkindly\b",
         r"\bhey\b",
         r"\bshree\b",
     ]
@@ -27,8 +36,89 @@ def clean_input(text: str) -> str:
     return cleaned
 
 
+def clean_llm_output(text: str) -> dict:
+    fallback = {
+        "action": "unknown",
+        "resource": "",
+        "device": "local",
+        "parameters": {},
+    }
+
+    if not text:
+        return fallback
+
+    cleaned_text = re.sub(r"```(?:json)?", " ", str(text), flags=re.IGNORECASE)
+    candidate = _extract_first_valid_json_object(cleaned_text)
+
+    if not _has_valid_intent_shape(candidate):
+        return fallback
+
+    return {
+        "action": candidate["action"],
+        "resource": candidate["resource"],
+        "device": candidate["device"],
+        "parameters": candidate["parameters"],
+    }
+
+
+def _extract_first_valid_json_object(text):
+    start_positions = [index for index, char in enumerate(text) if char == "{"] 
+
+    for start in start_positions:
+        brace_count = 0
+
+        for index in range(start, len(text)):
+            if text[index] == "{":
+                brace_count += 1
+            elif text[index] == "}":
+                brace_count -= 1
+
+                if brace_count != 0:
+                    continue
+
+                candidate_text = text[start : index + 1]
+
+                try:
+                    candidate = json.loads(candidate_text)
+                except json.JSONDecodeError:
+                    break
+
+                if _has_valid_intent_shape(candidate):
+                    return candidate
+
+                break
+
+    return None
+
+
+def _has_valid_intent_shape(candidate):
+    if not isinstance(candidate, dict):
+        return False
+
+    if any(key not in candidate for key in REQUIRED_INTENT_KEYS):
+        return False
+
+    if not isinstance(candidate.get("action"), str) or not candidate["action"].strip():
+        return False
+
+    if not isinstance(candidate.get("resource"), str):
+        return False
+
+    if not isinstance(candidate.get("device"), str):
+        return False
+
+    if not isinstance(candidate.get("parameters"), dict):
+        return False
+
+    return True
+
+
 class IntentEngine:
     FALLBACK_MESSAGE = "fallback"
+    RULE_CONFIDENCE_EXACT = 1.0
+    RULE_CONFIDENCE_FUZZY = 0.7
+    RULE_CONFIDENCE_WEAK = 0.4
+    CONFIDENCE_KEYWORDS = ("open", "play", "search")
 
     SYSTEM_PROMPT = """
         You are Shree, an offline AI intent parser.
@@ -54,6 +144,9 @@ class IntentEngine:
         - play_music
         - search
         - shutdown_system
+        - restart_system
+        - lock_screen
+        - sleep_system
         - unknown
 
         EXAMPLES:
@@ -87,7 +180,36 @@ class IntentEngine:
 
     def parse_local_intent(self, user_input):
         cleaned_input = clean_input(user_input)
+        return self._parse_local_intent_exact(cleaned_input)
 
+    def parse_local_intent_with_confidence(self, user_input):
+        cleaned_input = clean_input(user_input)
+        exact_intent = self._parse_local_intent_exact(cleaned_input)
+
+        if exact_intent:
+            return {
+                "intent": exact_intent,
+                "confidence": self.RULE_CONFIDENCE_EXACT,
+                "match_type": "exact",
+                "candidate_command": cleaned_input,
+            }
+
+        fuzzy_match = self._parse_fuzzy_local_intent(cleaned_input)
+
+        if fuzzy_match:
+            LOGGER.debug("Local intent matched fuzzy command: %s", fuzzy_match)
+            return fuzzy_match
+
+        weak_match = self._score_weak_local_match(cleaned_input)
+
+        return {
+            "intent": None,
+            "confidence": weak_match,
+            "match_type": "weak" if weak_match else "none",
+            "candidate_command": cleaned_input,
+        }
+
+    def _parse_local_intent_exact(self, cleaned_input):
         multi_intent = self.parse_multi_intent(cleaned_input)
 
         if multi_intent:
@@ -133,6 +255,12 @@ class IntentEngine:
             LOGGER.debug("Local intent matched reminder command: %s", reminder_intent)
             return reminder_intent
 
+        system_control_intent = self.parse_system_control_intent(cleaned_input)
+
+        if system_control_intent:
+            LOGGER.debug("Local intent matched system control command: %s", system_control_intent)
+            return system_control_intent
+
         shutdown_intent = self.parse_shutdown_intent(cleaned_input)
 
         if shutdown_intent:
@@ -140,6 +268,55 @@ class IntentEngine:
             return shutdown_intent
 
         return None
+
+    def _parse_fuzzy_local_intent(self, cleaned_input):
+        tokens = cleaned_input.split()
+
+        if not tokens:
+            return None
+
+        first_token = tokens[0]
+        fuzzy_keyword = get_close_matches(
+            first_token,
+            self.CONFIDENCE_KEYWORDS,
+            n=1,
+            cutoff=0.6,
+        )
+
+        if not fuzzy_keyword or fuzzy_keyword[0] == first_token:
+            return None
+
+        candidate_command = " ".join([fuzzy_keyword[0], *tokens[1:]])
+        candidate_intent = self._parse_local_intent_exact(candidate_command)
+
+        if not candidate_intent:
+            return None
+
+        return {
+            "intent": candidate_intent,
+            "confidence": self.RULE_CONFIDENCE_FUZZY,
+            "match_type": "fuzzy",
+            "candidate_command": candidate_command,
+        }
+
+    def _score_weak_local_match(self, cleaned_input):
+        tokens = cleaned_input.split()
+
+        if not tokens:
+            return 0.0
+
+        first_token = tokens[0]
+        weak_keyword = get_close_matches(
+            first_token,
+            self.CONFIDENCE_KEYWORDS,
+            n=1,
+            cutoff=0.4,
+        )
+
+        if weak_keyword:
+            return self.RULE_CONFIDENCE_WEAK
+
+        return 0.0
 
     def detect_intent(self, user_input):
         cleaned_input = clean_input(user_input)
@@ -150,72 +327,15 @@ class IntentEngine:
         try:
             response = generate(prompt)
             LOGGER.info("LLM raw response: %s", response)
-
-            json_data = self.extract_json(response)
-
-            if not self.is_valid_action_schema(json_data):
-                raise ValueError("Invalid JSON action schema returned by LLM.")
-
+            json_data = clean_llm_output(response)
+            LOGGER.info("LLM cleaned JSON: %s", json_data)
             return json_data
         except Exception as exc:
             LOGGER.warning("LLM intent detection failed: %s", exc)
             return self.build_unknown_action()
 
-    def extract_json(self, text):
-        if not text:
-            return None
-
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                LOGGER.warning("Regex JSON extraction failed for LLM output.")
-
-        start = text.find("{")
-
-        if start == -1:
-            return None
-
-        brace_count = 0
-
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                brace_count += 1
-            elif text[i] == "}":
-                brace_count -= 1
-
-                if brace_count == 0:
-                    json_str = text[start : i + 1]
-
-                    try:
-                        return json.loads(json_str)
-                    except json.JSONDecodeError:
-                        LOGGER.warning("Failed to parse JSON from LLM output: %s", json_str)
-                        return None
-
-        return None
-
     def is_valid_action_schema(self, action_schema):
-        if not isinstance(action_schema, dict):
-            return False
-
-        action = action_schema.get("action")
-        parameters = action_schema.get("parameters", {})
-
-        if not isinstance(action, str) or not action.strip():
-            return False
-
-        if not isinstance(parameters, dict):
-            return False
-
-        device = action_schema.get("device")
-
-        if device is not None and not isinstance(device, str):
-            return False
-
-        return True
+        return _has_valid_intent_shape(action_schema)
 
     def clean_text(self, text):
         text = text.lower().strip()
@@ -295,6 +415,11 @@ class IntentEngine:
 
         if reminder_intent:
             return reminder_intent
+
+        system_control_intent = self.parse_system_control_intent(cleaned_input)
+
+        if system_control_intent:
+            return system_control_intent
 
         shutdown_intent = self.parse_shutdown_intent(cleaned_input)
 
@@ -476,6 +601,18 @@ class IntentEngine:
     def parse_shutdown_intent(self, text):
         if text in {"shutdown system", "shutdown", "turn off system", "turn off pc"}:
             return self.build_action("shutdown_system", "system", {"confirm": False})
+
+        return None
+
+    def parse_system_control_intent(self, text):
+        if text in {"restart computer", "restart system", "restart pc", "reboot system", "reboot computer"}:
+            return self.build_action("restart_system", "system", {"confirm": False})
+
+        if text in {"lock screen", "lock computer", "lock pc"}:
+            return self.build_action("lock_screen", "screen", {})
+
+        if text in {"sleep system", "sleep computer", "sleep pc"}:
+            return self.build_action("sleep_system", "system", {})
 
         return None
 

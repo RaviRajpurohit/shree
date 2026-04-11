@@ -12,8 +12,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.agent_loop import AgentLoop
+from core.normalizer import normalize
 from plugins.open_app import OpenAppPlugin
 from plugins.base_plugin import BasePlugin
+from plugins.create_reminder import CreateReminderPlugin
 from plugins.play_music import PlayMusicPlugin
 from plugins.search_web import SearchWebPlugin
 
@@ -37,6 +39,7 @@ TEST_CATEGORIES = [
             "open chrome browser",
             "please open chrome",
             "can you open chrome",
+            "hello please open chrome",
             "launch chrome",
             "start chrome",
         ],
@@ -102,6 +105,8 @@ TEST_CATEGORIES = [
             "open chrome and play music",
             "open calculator and set reminder",
             "open chrome and search ai tutorial",
+            "open chrome with new tab",
+            "open chrome then new tab",
         ],
     ),
     (
@@ -172,6 +177,15 @@ class SnapshotSearchWebPlugin(SearchWebPlugin):
         return f"Searching for {query} [snapshot mode]"
 
 
+class SnapshotCreateReminderPlugin(CreateReminderPlugin):
+
+    def execute(self, parameters):
+        topic = (parameters.get("topic") or "reminder").strip()
+        day = (parameters.get("day") or "today").strip()
+        time = (parameters.get("time") or "unspecified").strip()
+        return f"Reminder created for {topic} on {day} at {time} [snapshot mode]"
+
+
 class SnapshotPlayMusicPlugin(PlayMusicPlugin):
 
     def send_media_key(self, command):
@@ -211,7 +225,45 @@ class SnapshotBrowserControlPlugin(BasePlugin):
 
     def execute(self, parameters):
         browser = (parameters.get("browser") or "browser").strip()
+        resource = (parameters.get("resource") or "new_tab").strip().lower()
+
+        if resource == "next_tab":
+            return f"Moved to the next tab in {browser} [snapshot mode]"
+
+        if resource == "previous_tab":
+            return f"Moved to the previous tab in {browser} [snapshot mode]"
+
         return f"Opened a new tab in {browser} [snapshot mode]"
+
+
+class SnapshotShutdownSystemPlugin(BasePlugin):
+
+    action = "shutdown_system"
+
+    def execute(self, parameters):
+        if not parameters.get("confirm"):
+            return "Shutdown requested [snapshot mode], but confirmation is required before powering off the system."
+
+        return "Shutdown confirmed [snapshot mode]."
+
+
+class SnapshotSystemControlPlugin(BasePlugin):
+    ACTION_LABELS = {
+        "restart_system": "Restart command sent. [snapshot mode]",
+        "lock_screen": "Lock screen command sent. [snapshot mode]",
+        "sleep_system": "Sleep command sent. [snapshot mode]",
+    }
+
+    def __init__(self, action_name):
+        self.action = action_name
+
+    def execute(self, parameters):
+        parameters = parameters or {}
+
+        if self.action == "restart_system" and not parameters.get("confirm"):
+            return "Confirmation required before restart"
+
+        return self.ACTION_LABELS.get(self.action, "System command sent. [snapshot mode]")
 
 
 def patch_llm_fallback(agent):
@@ -226,18 +278,54 @@ def patch_llm_fallback(agent):
     agent.intent_engine.detect_intent = instant_detect_intent
 
 
-def run_test_case(agent, command):
-    suggestion_before = agent.get_suggestion()
-    action_schema = agent.intent_router.route(command)
+def build_snapshot_agent():
+    agent = AgentLoop()
+    agent.plugin_manager.plugins["open"] = SnapshotOpenAppPlugin()
+    agent.plugin_manager.plugins["search"] = SnapshotSearchWebPlugin()
+    agent.plugin_manager.plugins["play_music"] = SnapshotPlayMusicPlugin()
+    agent.plugin_manager.plugins["create_reminder"] = SnapshotCreateReminderPlugin()
+    agent.plugin_manager.plugins["browser_control"] = SnapshotBrowserControlPlugin()
+    agent.plugin_manager.plugins["shutdown_system"] = SnapshotShutdownSystemPlugin()
+    agent.plugin_manager.plugins["restart_system"] = SnapshotSystemControlPlugin("restart_system")
+    agent.plugin_manager.plugins["lock_screen"] = SnapshotSystemControlPlugin("lock_screen")
+    agent.plugin_manager.plugins["sleep_system"] = SnapshotSystemControlPlugin("sleep_system")
+    patch_llm_fallback(agent)
+    return agent
+
+
+def resolve_command_snapshot(agent, command):
+    offline_response = agent.offline_knowledge_engine.respond(command)
+
+    if offline_response:
+        return {
+            "source": "offline_knowledge",
+            "action": "offline_response",
+            "resource": normalize_text_for_report(command),
+            "response": offline_response,
+        }
+
+    action_schema = normalize(agent.intent_router.route(command))
     response = agent.process(command)
-    suggestion_after = agent.get_suggestion()
 
     return {
-        "command": command,
         "source": get_result_source(action_schema),
         "action": get_result_action(action_schema),
         "resource": get_result_resource(action_schema),
         "response": response,
+    }
+
+
+def run_test_case(agent, command):
+    suggestion_before = agent.get_suggestion()
+    snapshot = resolve_command_snapshot(agent, command)
+    suggestion_after = agent.get_suggestion()
+
+    return {
+        "command": command,
+        "source": snapshot["source"],
+        "action": snapshot["action"],
+        "resource": snapshot["resource"],
+        "response": snapshot["response"],
         "suggestion_before": suggestion_before,
         "suggestion_after": suggestion_after,
     }
@@ -291,6 +379,8 @@ def classify_result(result):
         or "reminder created" in response
         or "searching for" in response
         or "offline ai assistant" in response
+        or "how can i help you offline today" in response
+        or "i can help with offline commands" in response
         or "recent commands:" in response
         or "because you " in response
     ):
@@ -300,6 +390,9 @@ def classify_result(result):
         return "success"
 
     if "shutdown requested" in response:
+        return "expected-safe-block"
+
+    if "confirmation required before restart" in response:
         return "expected-safe-block"
 
     if "llm unavailable" in response:
@@ -317,8 +410,13 @@ def classify_result(result):
     return "other"
 
 
+def normalize_text_for_report(text):
+    return " ".join(str(text or "").strip().lower().split())
+
+
 def build_report(results, suggestion_results, report_path):
     status_counter = Counter(classify_result(result) for result in results)
+    category_counter = Counter(result["category"] for result in results)
 
     lines = [
         "# Shree Prompt Test Report",
@@ -336,31 +434,45 @@ def build_report(results, suggestion_results, report_path):
     lines.extend(
         [
             "",
+            "## Categories",
+            "",
+        ]
+    )
+
+    for category_name, count in category_counter.items():
+        lines.append(f"- {category_name}: {count}")
+
+    lines.extend(
+        [
+            "",
             "## Command Snapshots",
             "",
         ]
     )
 
-    for result in results:
-        lines.extend(
-            [
-                f"### {result['command']}",
-                "",
-                f"- Source: {result['source']}",
-                f"- Action: {result['action']}",
-                f"- Resource: {result['resource']}",
-                f"- Suggestion before: {result['suggestion_before'] or 'None'}",
-                f"- Response: {result['response']}",
-                f"- Suggestion after: {result['suggestion_after'] or 'None'}",
-                f"- Classification: {classify_result(result)}",
-                "",
-                "```text",
-                f"You: {result['command']}",
-                f"Shree: {result['response']}",
-                "```",
-                "",
-            ]
-        )
+    for category_name, _commands in TEST_CATEGORIES:
+        lines.extend([f"### {category_name}", ""])
+
+        for result in [item for item in results if item["category"] == category_name]:
+            lines.extend(
+                [
+                    f"#### {result['command']}",
+                    "",
+                    f"- Source: {result['source']}",
+                    f"- Action: {result['action']}",
+                    f"- Resource: {result['resource']}",
+                    f"- Suggestion before: {result['suggestion_before'] or 'None'}",
+                    f"- Response: {result['response']}",
+                    f"- Suggestion after: {result['suggestion_after'] or 'None'}",
+                    f"- Classification: {classify_result(result)}",
+                    "",
+                    "```text",
+                    f"You: {result['command']}",
+                    f"Shree: {result['response']}",
+                    "```",
+                    "",
+                ]
+            )
 
     lines.extend(
         [
@@ -393,12 +505,7 @@ def main():
     reports_dir = ROOT / "reports"
     reports_dir.mkdir(exist_ok=True)
 
-    agent = AgentLoop()
-    agent.plugin_manager.plugins["open"] = SnapshotOpenAppPlugin()
-    agent.plugin_manager.plugins["search"] = SnapshotSearchWebPlugin()
-    agent.plugin_manager.plugins["play_music"] = SnapshotPlayMusicPlugin()
-    agent.plugin_manager.plugins["browser_control"] = SnapshotBrowserControlPlugin()
-    patch_llm_fallback(agent)
+    agent = build_snapshot_agent()
 
     results = []
 
@@ -408,12 +515,7 @@ def main():
             result["category"] = category_name
             results.append(result)
 
-    suggestion_agent = AgentLoop()
-    suggestion_agent.plugin_manager.plugins["open"] = SnapshotOpenAppPlugin()
-    suggestion_agent.plugin_manager.plugins["search"] = SnapshotSearchWebPlugin()
-    suggestion_agent.plugin_manager.plugins["play_music"] = SnapshotPlayMusicPlugin()
-    suggestion_agent.plugin_manager.plugins["browser_control"] = SnapshotBrowserControlPlugin()
-    patch_llm_fallback(suggestion_agent)
+    suggestion_agent = build_snapshot_agent()
     suggestion_results = [run_test_case(suggestion_agent, command) for command in SUGGESTION_SEQUENCE]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

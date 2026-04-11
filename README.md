@@ -5,6 +5,7 @@ Shree is a Python-based offline AI agent that parses user commands, routes them 
 ## Features
 
 - Offline-first intent routing with rule-based parsing and LLM fallback
+- Offline basic knowledge handling for identity, greetings, time, date, and help without using the LLM
 - Local plugin execution for actions like opening apps, web search, reminders, music, and browser control
 - Memory-backed features such as command history, suggestions, and explainable suggestions
 - Context-aware follow-up handling such as `open new tab` and `play next`
@@ -67,6 +68,11 @@ Run the prompt suite:
 ```powershell
 python scripts\run_prompt_suite.py
 ```
+
+The prompt suite runs in snapshot mode:
+- it replaces app, browser, music, reminder, and system-action plugins with safe test doubles
+- it keeps basic queries such as `who are you`, `what is time`, `what is date`, greetings, and help fully offline
+- it writes a Markdown report to `reports/` and prints the generated report path
 
 ## License
 

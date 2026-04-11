@@ -10,7 +10,10 @@ class Memory:
         self.command_counter = Counter()
         self.action_counter = Counter()
         self.resource_counter = Counter()
+        self.app_counter = Counter()
         self.hourly_action_counter = defaultdict(Counter)
+        self.last_5_commands = []
+        self.last_app = None
         self.last_suggested_command = None
         self.last_suggested_count = 0
         self.last_suggestion_reason = None
@@ -37,6 +40,11 @@ class Memory:
         if len(self.command_history) > self.history_limit:
             self.command_history.pop(0)
 
+        self.last_5_commands.append(user_input)
+
+        if len(self.last_5_commands) > 5:
+            self.last_5_commands.pop(0)
+
         if normalized_command:
             self.command_counter[normalized_command] += 1
 
@@ -46,6 +54,12 @@ class Memory:
 
         if resource:
             self.resource_counter[resource] += 1
+
+        app_name = self._extract_app_name(action_schema)
+
+        if app_name:
+            self.app_counter[app_name] += 1
+            self.last_app = app_name
 
     def get_recent_commands(self, limit=5):
         return self.command_history[-limit:]
@@ -99,6 +113,9 @@ class Memory:
             return None
 
         return resource_counter.most_common(1)[0]
+
+    def get_most_used_apps(self):
+        return self.app_counter.most_common()
 
     def get_hourly_top_action(self, hour):
         action_counts = self.hourly_action_counter.get(hour)
@@ -179,6 +196,23 @@ class Memory:
     @staticmethod
     def _normalize_command(user_input):
         return " ".join(user_input.lower().split())
+
+    @staticmethod
+    def _extract_app_name(action_schema):
+        if not action_schema:
+            return None
+
+        action = action_schema.get("action")
+        resource = action_schema.get("resource")
+        parameters = action_schema.get("parameters", {})
+
+        if action == "open":
+            return (parameters.get("name") or resource or "").strip() or None
+
+        if action == "browser_control":
+            return (parameters.get("browser") or "").strip() or None
+
+        return None
 
     @staticmethod
     def _extract_suggestion_target(text):

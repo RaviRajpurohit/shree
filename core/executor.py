@@ -15,6 +15,10 @@ class Executor:
     def execute(self, action_schema):
         if isinstance(action_schema, list):
             LOGGER.info("Executor received multi-action payload with %s actions", len(action_schema))
+
+            if not action_schema:
+                return "No actions to execute."
+
             responses = []
 
             for index, action in enumerate(action_schema, start=1):

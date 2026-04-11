@@ -9,7 +9,7 @@ except ImportError:
 
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_TIMEOUT_SECONDS = 5
+OLLAMA_TIMEOUT_SECONDS = 50
 
 
 LOGGER = logging.getLogger(__name__)
