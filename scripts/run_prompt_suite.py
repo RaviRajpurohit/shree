@@ -17,6 +17,7 @@ from plugins.open_app import OpenAppPlugin
 from plugins.base_plugin import BasePlugin
 from plugins.create_reminder import CreateReminderPlugin
 from plugins.play_music import PlayMusicPlugin
+from plugins.run_command import RunCommandPlugin
 from plugins.search_web import SearchWebPlugin
 
 
@@ -87,6 +88,16 @@ TEST_CATEGORIES = [
             "shutdown system",
             "restart computer",
             "lock screen",
+        ],
+    ),
+    (
+        "Terminal Commands",
+        [
+            "clear",
+            "run clear command",
+            "execute dir",
+            "type cls",
+            "ls",
         ],
     ),
     (
@@ -266,6 +277,23 @@ class SnapshotSystemControlPlugin(BasePlugin):
         return self.ACTION_LABELS.get(self.action, "System command sent. [snapshot mode]")
 
 
+class SnapshotRunCommandPlugin(RunCommandPlugin):
+
+    def execute(self, parameters):
+        raw_command = (parameters.get("command") or "").strip()
+        normalized_command = self.normalize_command(raw_command)
+
+        if self.is_blocked_command(normalized_command):
+            return f"Blocked unsafe command: {raw_command}"
+
+        safe_command = self.resolve_safe_command(normalized_command)
+
+        if not safe_command:
+            return f"Unsupported command: {raw_command}"
+
+        return f"Command executed successfully: {raw_command} [snapshot mode -> {safe_command}]"
+
+
 def patch_llm_fallback(agent):
     def instant_detect_intent(_user_input):
         return {
@@ -285,6 +313,7 @@ def build_snapshot_agent():
     agent.plugin_manager.plugins["play_music"] = SnapshotPlayMusicPlugin()
     agent.plugin_manager.plugins["create_reminder"] = SnapshotCreateReminderPlugin()
     agent.plugin_manager.plugins["browser_control"] = SnapshotBrowserControlPlugin()
+    agent.plugin_manager.plugins["run_command"] = SnapshotRunCommandPlugin()
     agent.plugin_manager.plugins["shutdown_system"] = SnapshotShutdownSystemPlugin()
     agent.plugin_manager.plugins["restart_system"] = SnapshotSystemControlPlugin("restart_system")
     agent.plugin_manager.plugins["lock_screen"] = SnapshotSystemControlPlugin("lock_screen")
@@ -378,6 +407,7 @@ def classify_result(result):
         or "stopping playback" in response
         or "reminder created" in response
         or "searching for" in response
+        or "command executed successfully" in response
         or "offline ai assistant" in response
         or "how can i help you offline today" in response
         or "i can help with offline commands" in response

@@ -27,6 +27,7 @@ from plugins.browser_control import BrowserControlPlugin
 from plugins.open_file import OpenFilePlugin
 from plugins.play_music import PlayMusicPlugin
 from plugins.plugin_manager import PluginManager
+from plugins.run_command import RunCommandPlugin
 from plugins.system_control import SystemControlPlugin
 
 
@@ -63,6 +64,27 @@ class DummyOpenFilePlugin(BasePlugin):
 
     def execute(self, parameters):
         return f"Opened file: {parameters['name']} [test]"
+
+
+class DummyRunCommandPlugin(BasePlugin):
+    action = "run_command"
+
+    def execute(self, parameters):
+        return f"Command executed successfully: {parameters['command']} [test]"
+
+
+class FailingRunCommandPlugin(BasePlugin):
+    action = "run_command"
+
+    def execute(self, parameters):
+        return f"Failed to execute '{parameters['command']}' command"
+
+
+class CrashingRunCommandPlugin(BasePlugin):
+    action = "run_command"
+
+    def execute(self, parameters):
+        raise RuntimeError("boom")
 
 
 class ShreeFeatureTests(unittest.TestCase):
@@ -462,6 +484,49 @@ class ShreeFeatureTests(unittest.TestCase):
         self.assertEqual(action_schema["resource"], "system")
         self.assertEqual(action_schema["metadata"]["source"], "rule")
 
+    def test_local_intent_maps_clear_to_run_command(self):
+        agent = AgentLoop()
+
+        action_schema = agent.intent_router.route("clear")
+
+        self.assertEqual(action_schema["action"], "run_command")
+        self.assertEqual(action_schema["resource"], "terminal")
+        self.assertEqual(action_schema["parameters"]["command"], "clear")
+        self.assertEqual(action_schema["metadata"]["source"], "rule")
+
+    def test_local_intent_maps_explicit_run_command(self):
+        agent = AgentLoop()
+
+        action_schema = agent.intent_router.route("run command clear")
+
+        self.assertEqual(action_schema["action"], "run_command")
+        self.assertEqual(action_schema["parameters"]["command"], "clear")
+
+    def test_local_intent_maps_run_clear_command_without_open_fallback(self):
+        agent = AgentLoop()
+
+        action_schema = agent.intent_router.route("run clear command")
+
+        self.assertEqual(action_schema["action"], "run_command")
+        self.assertEqual(action_schema["parameters"]["command"], "clear")
+        self.assertNotEqual(action_schema["action"], "open")
+
+    def test_local_intent_maps_execute_dir_to_run_command(self):
+        agent = AgentLoop()
+
+        action_schema = agent.intent_router.route("execute dir")
+
+        self.assertEqual(action_schema["action"], "run_command")
+        self.assertEqual(action_schema["parameters"]["command"], "dir")
+
+    def test_local_intent_maps_type_cls_to_run_command(self):
+        agent = AgentLoop()
+
+        action_schema = agent.intent_router.route("type cls")
+
+        self.assertEqual(action_schema["action"], "run_command")
+        self.assertEqual(action_schema["parameters"]["command"], "cls")
+
     def test_router_maps_open_tab_in_chrome(self):
         agent = AgentLoop()
 
@@ -594,6 +659,54 @@ class ShreeFeatureTests(unittest.TestCase):
             "chrome opened [test] | Opened a new tab in chrome [test]",
         )
 
+    def test_executor_stops_multi_step_execution_after_failure(self):
+        plugin_manager = PluginManager()
+        plugin_manager.plugins["open"] = DummyOpenPlugin()
+        plugin_manager.plugins["run_command"] = FailingRunCommandPlugin()
+        plugin_manager.plugins["browser_control"] = DummyBrowserControlPlugin()
+        executor = Executor(plugin_manager)
+
+        response = executor.execute(
+            [
+                {"action": "open", "resource": "cmd", "parameters": {"name": "cmd"}},
+                {"action": "run_command", "resource": "terminal", "parameters": {"command": "clear"}},
+                {
+                    "action": "browser_control",
+                    "resource": "new_tab",
+                    "parameters": {"browser": "chrome", "resource": "new_tab"},
+                },
+            ]
+        )
+
+        self.assertEqual(
+            response,
+            "cmd opened [test] | Failed to execute 'clear' command",
+        )
+
+    def test_executor_returns_partial_result_when_step_crashes(self):
+        plugin_manager = PluginManager()
+        plugin_manager.plugins["open"] = DummyOpenPlugin()
+        plugin_manager.plugins["run_command"] = CrashingRunCommandPlugin()
+        plugin_manager.plugins["browser_control"] = DummyBrowserControlPlugin()
+        executor = Executor(plugin_manager)
+
+        response = executor.execute(
+            [
+                {"action": "open", "resource": "cmd", "parameters": {"name": "cmd"}},
+                {"action": "run_command", "resource": "terminal", "parameters": {"command": "clear"}},
+                {
+                    "action": "browser_control",
+                    "resource": "new_tab",
+                    "parameters": {"browser": "chrome", "resource": "new_tab"},
+                },
+            ]
+        )
+
+        self.assertEqual(
+            response,
+            "cmd opened [test] | Failed to execute 'clear' command",
+        )
+
     def test_plugin_manager_registers_open_file_plugin(self):
         plugin_manager = PluginManager()
 
@@ -616,6 +729,14 @@ class ShreeFeatureTests(unittest.TestCase):
         self.assertIsInstance(plugin_manager.get_plugin("restart_system"), SystemControlPlugin)
         self.assertIsInstance(plugin_manager.get_plugin("lock_screen"), SystemControlPlugin)
         self.assertIsInstance(plugin_manager.get_plugin("sleep_system"), SystemControlPlugin)
+
+    def test_plugin_manager_registers_run_command_plugin(self):
+        plugin_manager = PluginManager()
+
+        plugin = plugin_manager.get_plugin("run_command")
+
+        self.assertIsNotNone(plugin)
+        self.assertIsInstance(plugin, RunCommandPlugin)
 
     def test_agent_loop_returns_recent_last_five_commands(self):
         agent = AgentLoop()
@@ -694,6 +815,23 @@ class ShreeFeatureTests(unittest.TestCase):
             response = agent.process("open file called report.pdf")
 
         self.assertEqual(response, "Opened file: report.pdf [test]")
+
+    def test_agent_loop_executes_run_command_intent(self):
+        agent = AgentLoop()
+        agent.plugin_manager.plugins["run_command"] = DummyRunCommandPlugin()
+
+        with patch.object(
+            agent.intent_router,
+            "route",
+            return_value={
+                "action": "run_command",
+                "resource": "terminal",
+                "parameters": {"command": "clear"},
+            },
+        ):
+            response = agent.process("clear")
+
+        self.assertEqual(response, "Command executed successfully: clear [test]")
 
     def test_agent_loop_records_successful_action_in_memory_manager(self):
         memory_path = ROOT / ".codex_tmp" / f"memory_manager_{uuid.uuid4().hex}.json"
@@ -775,6 +913,64 @@ class ShreeFeatureTests(unittest.TestCase):
 
         self.assertEqual(response, "Lock screen command sent.")
         mock_run.assert_called_once()
+
+    def test_run_command_plugin_executes_clear_on_windows(self):
+        plugin = RunCommandPlugin()
+
+        with patch("plugins.run_command.os.name", "nt"):
+            with patch("plugins.run_command.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                response = plugin.execute({"command": "clear"})
+
+        self.assertEqual(response, "Command executed successfully: clear")
+        mock_run.assert_called_once_with(
+            "cls",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+    def test_run_command_plugin_normalizes_ls_to_dir_on_windows(self):
+        plugin = RunCommandPlugin()
+
+        with patch("plugins.run_command.os.name", "nt"):
+            with patch("plugins.run_command.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                response = plugin.execute({"command": "ls"})
+
+        self.assertEqual(response, "Command executed successfully: ls")
+        mock_run.assert_called_once_with(
+            "dir",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+    def test_run_command_plugin_normalize_command_maps_aliases(self):
+        self.assertEqual(RunCommandPlugin.normalize_command("clear"), "cls")
+        self.assertEqual(RunCommandPlugin.normalize_command("ls"), "dir")
+
+    def test_run_command_plugin_blocks_harmful_commands(self):
+        plugin = RunCommandPlugin()
+
+        with patch("plugins.run_command.subprocess.run") as mock_run:
+            response = plugin.execute({"command": "del important.txt"})
+
+        self.assertEqual(response, "Blocked unsafe command: del important.txt")
+        mock_run.assert_not_called()
+
+    def test_run_command_plugin_rejects_unsupported_commands(self):
+        plugin = RunCommandPlugin()
+
+        with patch("plugins.run_command.subprocess.run") as mock_run:
+            response = plugin.execute({"command": "pwd"})
+
+        self.assertEqual(response, "Unsupported command: pwd")
+        mock_run.assert_not_called()
 
     def test_play_music_plugin_opens_youtube_search(self):
         plugin = PlayMusicPlugin()

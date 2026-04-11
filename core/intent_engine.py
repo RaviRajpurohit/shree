@@ -118,7 +118,7 @@ class IntentEngine:
     RULE_CONFIDENCE_EXACT = 1.0
     RULE_CONFIDENCE_FUZZY = 0.7
     RULE_CONFIDENCE_WEAK = 0.4
-    CONFIDENCE_KEYWORDS = ("open", "play", "search")
+    CONFIDENCE_KEYWORDS = ("open", "play", "search", "clear", "run")
 
     SYSTEM_PROMPT = """
         You are Shree, an offline AI intent parser.
@@ -140,6 +140,7 @@ class IntentEngine:
 
         VALID ACTIONS:
         - open
+        - run_command
         - create_reminder
         - play_music
         - search
@@ -150,6 +151,9 @@ class IntentEngine:
         - unknown
 
         EXAMPLES:
+        Input: clear
+        Output: {"action":"run_command","resource":"terminal","device":"local","parameters":{"command":"clear"}}
+
         Input: open chrome
         Output: {"action":"open","resource":"chrome","device":"local","parameters":{"name":"chrome"}}
 
@@ -162,6 +166,7 @@ class IntentEngine:
 
     SIMPLE_COMMAND_PREFIXES = (
         "open ",
+        "run command",
         "play ",
         "create reminder",
         "set reminder",
@@ -169,7 +174,7 @@ class IntentEngine:
         "shutdown",
         "turn off",
     )
-    OPEN_KEYWORDS = ("open", "launch", "start", "run")
+    OPEN_KEYWORDS = ("open", "launch", "start")
     OPEN_PREFIXES = (
         "please ",
         "can you ",
@@ -215,6 +220,12 @@ class IntentEngine:
         if multi_intent:
             LOGGER.debug("Local intent matched multi-intent command: %s", multi_intent)
             return multi_intent
+
+        run_command_intent = self.parse_run_command_intent(cleaned_input)
+
+        if run_command_intent:
+            LOGGER.debug("Local intent matched run command: %s", run_command_intent)
+            return run_command_intent
 
         open_intent = self.parse_open_intent(cleaned_input)
 
@@ -381,6 +392,11 @@ class IntentEngine:
         return parts
 
     def parse_single_local_intent(self, user_input):
+        run_command_intent = self.parse_run_command_intent(user_input)
+
+        if run_command_intent:
+            return run_command_intent
+
         open_intent = self.parse_open_intent(user_input)
 
         if open_intent:
@@ -425,6 +441,47 @@ class IntentEngine:
 
         if shutdown_intent:
             return shutdown_intent
+
+        return None
+
+    def parse_run_command_intent(self, text):
+        cleaned_text = self.clean_text(text)
+
+        if cleaned_text in {"clear", "clear screen", "clear terminal", "clear console", "cls"}:
+            return self.build_action(
+                "run_command",
+                "terminal",
+                {"command": "clear"},
+            )
+
+        command = self.extract_run_command(cleaned_text)
+
+        if not command:
+            return None
+
+        return self.build_action(
+            "run_command",
+            "terminal",
+            {"command": command},
+        )
+
+    def extract_run_command(self, cleaned_text):
+        patterns = (
+            r"^(?:run|execute|type)\s+(?P<command>.+?)\s+command$",
+            r"^(?:run|execute|type)\s+command\s+(?P<command>.+)$",
+            r"^(?:run|execute|type)\s+(?P<command>.+)$",
+        )
+
+        for pattern in patterns:
+            match = re.match(pattern, cleaned_text, re.IGNORECASE)
+
+            if not match:
+                continue
+
+            command = (match.group("command") or "").strip()
+
+            if command:
+                return command
 
         return None
 
