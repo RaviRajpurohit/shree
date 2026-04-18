@@ -32,9 +32,10 @@ class IntentRouter:
         "shree ",
     )
 
-    def __init__(self, intent_engine, memory=None):
+    def __init__(self, intent_engine, memory=None, context_manager=None):
         self.intent_engine = intent_engine
         self.memory = memory
+        self.context_manager = context_manager
 
     def route(self, user_input):
         chained_intent = self._resolve_chained_intent(user_input)
@@ -304,6 +305,13 @@ class IntentRouter:
         return None
 
     def _get_context_browser(self):
+        if self.context_manager:
+            active_app = self.context_manager.get_active_app()
+            browser = self._extract_browser_name(active_app)
+
+            if browser:
+                return browser
+
         if not self.memory:
             return None
 

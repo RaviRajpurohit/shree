@@ -7,6 +7,8 @@ LOGGER = logging.getLogger(__name__)
 
 class Executor:
     RESERVED_OPEN_RESOURCES = {"tab", "next", "previous"}
+    CONTEXTUAL_APP_ACTIONS = {"browser_control"}
+    BROWSER_APPS = {"chrome", "edge", "firefox"}
     FAILURE_MARKERS = (
         "invalid command format",
         "missing action in command",
@@ -24,9 +26,10 @@ class Executor:
         "unsupported",
     )
 
-    def __init__(self, plugin_manager):
+    def __init__(self, plugin_manager, context_manager=None):
 
         self.plugin_manager = plugin_manager
+        self.context_manager = context_manager
 
     def execute(self, action_schema):
         if isinstance(action_schema, list):
@@ -65,6 +68,20 @@ class Executor:
 
             return " | ".join(response for response in responses if response)
 
+        try:
+            return self._execute_single_step(action_schema)
+        except Exception as exc:
+            failed_action = self.normalize_action(action_schema.get("action")) if isinstance(action_schema, dict) else "unknown"
+            failed_target = self._describe_action_target(action_schema)
+            LOGGER.exception(
+                "Executor failed while handling single-step action=%s target=%s",
+                failed_action,
+                failed_target,
+            )
+            return self._build_step_failure_message(failed_action, failed_target, exc)
+
+    def _execute_single_step(self, action_schema):
+
         if not isinstance(action_schema, dict):
             LOGGER.warning("Executor received invalid action schema: %s", action_schema)
             return "Invalid command format."
@@ -86,6 +103,8 @@ class Executor:
         if action == "play_music" and resource and not parameters.get("resource"):
             parameters["resource"] = resource
 
+        parameters = self._inject_context_parameters(action, parameters)
+
         plugin = self.plugin_manager.get_plugin(action)
 
         if plugin:
@@ -104,8 +123,16 @@ class Executor:
                 return plugin.execute(parameters)
             except Exception as exc:
                 LOGGER.exception(
-                    "Plugin %s crashed during execution",
+                    "Plugin %s crashed during execution for action=%s target=%s",
                     plugin.__class__.__name__,
+                    action,
+                    self._describe_action_target(
+                        {
+                            "action": action,
+                            "resource": resource,
+                            "parameters": parameters,
+                        }
+                    ),
                 )
                 failed_target = self._describe_action_target(
                     {
@@ -131,6 +158,35 @@ class Executor:
             return plugin.validate_parameters(parameters)
 
         return None
+
+    def _inject_context_parameters(self, action, parameters):
+        if action not in self.CONTEXTUAL_APP_ACTIONS:
+            return parameters
+
+        if not self.context_manager:
+            return parameters
+
+        active_app = str(self.context_manager.get_active_app() or "").strip().lower()
+
+        if not active_app:
+            return parameters
+
+        if action == "browser_control" and active_app not in self.BROWSER_APPS:
+            return parameters
+
+        browser = str(parameters.get("browser") or "").strip().lower()
+
+        if browser and browser != "default":
+            return parameters
+
+        updated_parameters = dict(parameters)
+        updated_parameters["browser"] = active_app
+        LOGGER.info(
+            "Executor injected active app '%s' into action '%s' from runtime context.",
+            active_app,
+            action,
+        )
+        return updated_parameters
 
     @staticmethod
     def normalize_action(action):

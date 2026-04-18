@@ -1,9 +1,11 @@
 import logging
 
 from core.intent_engine import IntentEngine
+from core.context_manager import ContextManager
 from core.intent_router import IntentRouter
 from core.memory import Memory
 from core.memory_manager import MemoryManager
+from core.normalization_engine import NormalizationEngine
 from core.normalizer import normalize
 from core.offline_knowledge_engine import OfflineKnowledgeEngine
 from core.planner_engine import PlannerEngine
@@ -20,26 +22,29 @@ class AgentLoop:
     def __init__(self):
 
         self.intent_engine = IntentEngine()
+        self.context_manager = ContextManager()
         self.memory = Memory()
         self.memory_manager = MemoryManager()
+        self.normalization_engine = NormalizationEngine()
         self.offline_knowledge_engine = OfflineKnowledgeEngine()
         self.planner_engine = PlannerEngine()
-        self.intent_router = IntentRouter(self.intent_engine, self.memory)
+        self.intent_router = IntentRouter(self.intent_engine, self.memory, self.context_manager)
         self.plugin_manager = PluginManager()
-        self.executor = Executor(self.plugin_manager)
+        self.executor = Executor(self.plugin_manager, self.context_manager)
         self.suggestion_engine = SuggestionEngine(self.memory, self.memory_manager)
 
     def process(self, user_input):
         LOGGER.info("User input received: %s", user_input)
 
-        normalized_input = " ".join(user_input.lower().split())
-        offline_response = self.offline_knowledge_engine.respond(user_input)
+        normalized_user_input = self.normalization_engine.normalize(user_input)
+        normalized_input = " ".join(normalized_user_input.lower().split())
+        offline_response = self.offline_knowledge_engine.respond(normalized_user_input)
 
         if offline_response:
             LOGGER.info("Resolved with OfflineKnowledgeEngine: %s", offline_response)
             return offline_response
 
-        action_schema = normalize(self.intent_router.route(user_input))
+        action_schema = normalize(self.intent_router.route(normalized_user_input))
 
         if not action_schema:
             LOGGER.warning("No action schema could be created for input: %s", user_input)
@@ -62,6 +67,7 @@ class AgentLoop:
                 self.memory.remember(user_input, action)
                 self.memory.update_last_action(action)
                 self.record_successful_action(action, response)
+                self.update_runtime_context(action, response)
 
             self.suggestion_engine.update_after_command()
             return response
@@ -94,6 +100,7 @@ class AgentLoop:
             self.memory.remember(user_input, action)
             self.memory.update_last_action(action)
             self.record_successful_action(action, response)
+            self.update_runtime_context(action, response)
 
         self.suggestion_engine.update_after_command()
 
@@ -126,6 +133,15 @@ class AgentLoop:
             return
 
         self.memory_manager.record_action(
+            action_schema.get("action"),
+            action_schema.get("resource", ""),
+        )
+
+    def update_runtime_context(self, action_schema, response):
+        if not self._should_record_action(action_schema, response):
+            return
+
+        self.context_manager.update_context(
             action_schema.get("action"),
             action_schema.get("resource", ""),
         )

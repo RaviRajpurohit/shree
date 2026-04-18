@@ -172,6 +172,34 @@ Every user gets a unique AI experience.
 
 ---
 
+## 🧪 Testing
+
+### Running Tests
+
+Run the comprehensive test suite:
+
+```bash
+python tests/test_shree_features.py
+```
+
+### Test Logging
+
+Test results are automatically logged to `reports/tests/test-log` when tests are executed. This file contains:
+
+* Test name and status (PASS/FAIL/ERROR)
+* Error messages for failed or errored tests
+* Useful for CI/CD integration and test history tracking
+
+Example log output:
+```
+[PASS] test_planner_engine_wraps_single_action_with_step_number
+[PASS] test_planner_engine_keeps_action_list_and_adds_step_numbers
+[FAIL] test_agent_loop_executes_open_file_intent
+  Error: AssertionError: 'Opened file: report.pdf [test]' != 'Opened file: report.pdf'
+```
+
+---
+
 ## 🤝 Contributing
 
 This is an evolving project. Contributions, ideas, and feedback are welcome.

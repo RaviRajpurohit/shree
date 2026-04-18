@@ -13,11 +13,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.agent_loop import AgentLoop
+from core.context_manager import ContextManager
 from core.executor import Executor
 from core.intent_engine import clean_llm_output
 from core.intent_engine import clean_input
 from core.memory import Memory
 from core.memory_manager import MemoryManager
+from core.normalization_engine import NormalizationEngine
 from core.normalizer import normalize
 from core.offline_knowledge_engine import OfflineKnowledgeEngine
 from core.planner_engine import PlannerEngine
@@ -88,6 +90,16 @@ class CrashingRunCommandPlugin(BasePlugin):
         raise RuntimeError("boom")
 
 
+class CrashingValidationPlugin(BasePlugin):
+    action = "open"
+
+    def validate_parameters(self, parameters):
+        raise RuntimeError("validation boom")
+
+    def execute(self, parameters):
+        return "should not run"
+
+
 class ShreeFeatureTests(unittest.TestCase):
     def test_planner_engine_wraps_single_action_with_step_number(self):
         planner = PlannerEngine()
@@ -139,6 +151,52 @@ class ShreeFeatureTests(unittest.TestCase):
         self.assertEqual(plan[1]["step"], 2)
         self.assertEqual(plan[1]["action"], "run_command")
 
+    def test_planner_engine_prepends_open_chrome_for_search_without_browser(self):
+        planner = PlannerEngine()
+
+        plan = planner.build_plan(
+            {
+                "action": "search",
+                "resource": "web",
+                "device": "local",
+                "parameters": {"query": "python"},
+            }
+        )
+
+        self.assertEqual(len(plan), 2)
+        self.assertEqual(plan[0]["step"], 1)
+        self.assertEqual(plan[0]["action"], "open")
+        self.assertEqual(plan[0]["resource"], "chrome")
+        self.assertEqual(plan[0]["parameters"]["name"], "chrome")
+        self.assertEqual(plan[1]["step"], 2)
+        self.assertEqual(plan[1]["action"], "search")
+
+    def test_planner_engine_does_not_duplicate_open_chrome_for_search_plan(self):
+        planner = PlannerEngine()
+
+        plan = planner.build_plan(
+            [
+                {
+                    "action": "open",
+                    "resource": "chrome",
+                    "device": "local",
+                    "parameters": {"name": "chrome"},
+                },
+                {
+                    "action": "search",
+                    "resource": "web",
+                    "device": "local",
+                    "parameters": {"query": "python"},
+                },
+            ]
+        )
+
+        self.assertEqual(len(plan), 2)
+        self.assertEqual(plan[0]["step"], 1)
+        self.assertEqual(plan[0]["action"], "open")
+        self.assertEqual(plan[1]["step"], 2)
+        self.assertEqual(plan[1]["action"], "search")
+
     def test_offline_knowledge_engine_handles_identity_query(self):
         engine = OfflineKnowledgeEngine()
 
@@ -174,6 +232,18 @@ class ShreeFeatureTests(unittest.TestCase):
             clean_input("hello please open chrome"),
             "open chrome",
         )
+
+    def test_normalization_engine_corrects_typo_for_open_command(self):
+        engine = NormalizationEngine()
+
+        self.assertEqual(engine.normalize("open chrom"), "open chrome")
+
+    def test_normalization_engine_maps_aliases_and_commands(self):
+        engine = NormalizationEngine()
+
+        self.assertEqual(engine.normalize("open calcy"), "open calculator")
+        self.assertEqual(engine.normalize("run clear command"), "run cls command")
+        self.assertEqual(engine.normalize("run ls"), "run dir")
 
     def test_clean_llm_output_extracts_first_valid_json_from_markdown(self):
         output = clean_llm_output(
@@ -260,6 +330,34 @@ class ShreeFeatureTests(unittest.TestCase):
         self.assertEqual(len(last_actions), 1)
         self.assertEqual(last_actions[0]["action"], "play_music")
 
+    def test_context_manager_tracks_active_app_last_action_and_session_limit(self):
+        manager = ContextManager()
+
+        commands = [
+            ("open", "chrome"),
+            ("browser_control", "new_tab"),
+            ("open", "notepad"),
+            ("open", "calc"),
+            ("open", "edge"),
+            ("open", "firefox"),
+        ]
+
+        for action, resource in commands:
+            manager.update_context(action, resource)
+
+        self.assertEqual(manager.get_active_app(), "firefox")
+        self.assertEqual(manager.get_last_action(), "open")
+        self.assertEqual(
+            manager.get_session(),
+            [
+                {"action": "browser_control", "resource": "new_tab"},
+                {"action": "open", "resource": "notepad"},
+                {"action": "open", "resource": "calc"},
+                {"action": "open", "resource": "edge"},
+                {"action": "open", "resource": "firefox"},
+            ],
+        )
+
     def test_memory_tracks_last_five_commands_and_last_app(self):
         memory = Memory()
 
@@ -294,50 +392,61 @@ class ShreeFeatureTests(unittest.TestCase):
             [("chrome", 3), ("edge", 1)],
         )
 
-    def test_suggestion_engine_uses_memory_manager_for_frequent_action(self):
+    def test_suggestion_engine_suggests_next_action_from_recent_pattern(self):
         memory = Memory()
         memory_path = ROOT / ".codex_tmp" / f"suggestion_memory_{uuid.uuid4().hex}.json"
         self.addCleanup(memory_path.unlink, True)
         memory_manager = MemoryManager(memory_path)
         suggestion_engine = SuggestionEngine(memory, memory_manager)
 
-        for _ in range(3):
-            memory.remember(
-                "open chrome",
-                {
-                    "action": "open",
-                    "resource": "chrome",
-                    "parameters": {"name": "chrome"},
-                },
-            )
-            memory_manager.record_action("open", "chrome")
+        full_sequence = [
+            ("open chrome", {"action": "open", "resource": "chrome", "parameters": {"name": "chrome"}}),
+            ("open new tab", {"action": "browser_control", "resource": "new_tab", "parameters": {"browser": "chrome", "resource": "new_tab"}}),
+            ("search youtube", {"action": "search", "resource": "web", "parameters": {"query": "youtube"}}),
+        ]
+        partial_sequence = full_sequence[:2]
+
+        for _ in range(2):
+            for command, intent in full_sequence:
+                memory.remember(command, intent)
+
+        for command, intent in partial_sequence:
+            memory.remember(command, intent)
 
         self.assertEqual(
             suggestion_engine.get_suggestion(),
-            "You usually open chrome. Want me to?",
+            "You usually search after opening chrome. Want me to search something?",
         )
 
-    def test_suggestion_engine_suggests_repeated_sequence(self):
+    def test_suggestion_engine_avoids_duplicate_suggestions(self):
         memory = Memory()
         memory_path = ROOT / ".codex_tmp" / f"suggestion_memory_{uuid.uuid4().hex}.json"
         self.addCleanup(memory_path.unlink, True)
         memory_manager = MemoryManager(memory_path)
         suggestion_engine = SuggestionEngine(memory, memory_manager)
 
-        sequence = [
+        full_sequence = [
             ("open chrome", {"action": "open", "resource": "chrome", "parameters": {"name": "chrome"}}),
             ("open new tab", {"action": "browser_control", "resource": "new_tab", "parameters": {"browser": "chrome", "resource": "new_tab"}}),
             ("search python", {"action": "search", "resource": "web", "parameters": {"query": "python"}}),
         ]
+        partial_sequence = full_sequence[:2]
 
         for _ in range(2):
-            for command, intent in sequence:
+            for command, intent in full_sequence:
                 memory.remember(command, intent)
 
+        for command, intent in partial_sequence:
+            memory.remember(command, intent)
+
+        first_suggestion = suggestion_engine.get_suggestion()
+        second_suggestion = suggestion_engine.update_after_command()
+
         self.assertEqual(
-            suggestion_engine.get_suggestion(),
-            "You often open chrome then open new tab then search python. Want me to do that?",
+            first_suggestion,
+            "You usually search after opening chrome. Want me to search something?",
         )
+        self.assertEqual(second_suggestion, first_suggestion)
 
     def test_normalizer_converts_open_new_tab_in_chrome(self):
         action_schema = normalize(
@@ -408,6 +517,18 @@ class ShreeFeatureTests(unittest.TestCase):
         self.assertEqual(action_schema["parameters"]["browser"], "chrome")
         self.assertEqual(action_schema["metadata"]["source"], "pattern")
 
+    def test_router_uses_context_manager_active_app_for_open_new_tab(self):
+        context_manager = ContextManager()
+        context_manager.update_context("open", "chrome")
+
+        router = IntentRouter(intent_engine=None, memory=None, context_manager=context_manager)
+        action_schema = router.route("open new tab")
+
+        self.assertEqual(action_schema["action"], "browser_control")
+        self.assertEqual(action_schema["resource"], "new_tab")
+        self.assertEqual(action_schema["parameters"]["browser"], "chrome")
+        self.assertEqual(action_schema["metadata"]["source"], "pattern")
+
     def test_router_prioritizes_pattern_for_open_new_tab_in_chrome(self):
         agent = AgentLoop()
 
@@ -447,6 +568,25 @@ class ShreeFeatureTests(unittest.TestCase):
 
         mock_detect.assert_not_called()
         self.assertIn("opening apps", response)
+
+    def test_agent_loop_normalizes_input_before_intent_router(self):
+        agent = AgentLoop()
+        agent.plugin_manager.plugins["open"] = DummyOpenPlugin()
+
+        with patch.object(
+            agent.intent_router,
+            "route",
+            return_value={
+                "action": "open",
+                "resource": "chrome",
+                "device": "local",
+                "parameters": {"name": "chrome"},
+            },
+        ) as mock_route:
+            response = agent.process("open chrom")
+
+        mock_route.assert_called_once_with("open chrome")
+        self.assertEqual(response, "chrome opened [test]")
 
     def test_agent_loop_builds_execution_plan_before_executor(self):
         agent = AgentLoop()
@@ -740,6 +880,40 @@ class ShreeFeatureTests(unittest.TestCase):
             "chrome opened [test] | Opened a new tab in chrome [test]",
         )
 
+    def test_executor_injects_active_browser_from_context_when_missing(self):
+        plugin_manager = PluginManager()
+        plugin_manager.plugins["browser_control"] = DummyBrowserControlPlugin()
+        context_manager = ContextManager()
+        context_manager.update_context("open", "chrome")
+        executor = Executor(plugin_manager, context_manager)
+
+        response = executor.execute(
+            {
+                "action": "browser_control",
+                "resource": "new_tab",
+                "parameters": {"resource": "new_tab"},
+            }
+        )
+
+        self.assertEqual(response, "Opened a new tab in chrome [test]")
+
+    def test_executor_replaces_default_browser_with_active_browser_from_context(self):
+        plugin_manager = PluginManager()
+        plugin_manager.plugins["browser_control"] = DummyBrowserControlPlugin()
+        context_manager = ContextManager()
+        context_manager.update_context("open", "chrome")
+        executor = Executor(plugin_manager, context_manager)
+
+        response = executor.execute(
+            {
+                "action": "browser_control",
+                "resource": "new_tab",
+                "parameters": {"browser": "default", "resource": "new_tab"},
+            }
+        )
+
+        self.assertEqual(response, "Opened a new tab in chrome [test]")
+
     def test_executor_stops_multi_step_execution_after_failure(self):
         plugin_manager = PluginManager()
         plugin_manager.plugins["open"] = DummyOpenPlugin()
@@ -787,6 +961,21 @@ class ShreeFeatureTests(unittest.TestCase):
             response,
             "cmd opened [test] | Failed to execute 'clear' command",
         )
+
+    def test_executor_returns_failure_message_when_single_step_setup_crashes(self):
+        plugin_manager = PluginManager()
+        plugin_manager.plugins["open"] = CrashingValidationPlugin()
+        executor = Executor(plugin_manager)
+
+        response = executor.execute(
+            {
+                "action": "open",
+                "resource": "chrome",
+                "parameters": {"name": "chrome"},
+            }
+        )
+
+        self.assertEqual(response, "Failed to execute 'chrome' command")
 
     def test_plugin_manager_registers_open_file_plugin(self):
         plugin_manager = PluginManager()
@@ -850,18 +1039,46 @@ class ShreeFeatureTests(unittest.TestCase):
         agent.memory_manager = MemoryManager(memory_path)
         agent.suggestion_engine = SuggestionEngine(agent.memory, agent.memory_manager)
         agent.plugin_manager.plugins["open"] = DummyOpenPlugin()
+        agent.plugin_manager.plugins["browser_control"] = DummyBrowserControlPlugin()
 
-        for _ in range(5):
-            agent.process("open chrome")
+        commands = [
+            "open chrome",
+            "open new tab",
+            "search youtube",
+            "open chrome",
+            "open new tab",
+            "search youtube",
+            "open chrome",
+            "open new tab",
+        ]
 
-        self.assertEqual(
-            agent.get_suggestion(),
-            "You usually open chrome. Want me to?",
-        )
-        self.assertEqual(
-            agent.process("why did you suggest chrome"),
-            "Because you opened chrome 5 times recently",
-        )
+        with patch.object(
+            agent.intent_router,
+            "route",
+            side_effect=[
+                {"action": "open", "resource": "chrome", "device": "local", "parameters": {"name": "chrome"}},
+                {"action": "browser_control", "resource": "new_tab", "device": "local", "parameters": {"browser": "chrome", "resource": "new_tab"}},
+                {"action": "search", "resource": "web", "device": "local", "parameters": {"query": "youtube"}},
+                {"action": "open", "resource": "chrome", "device": "local", "parameters": {"name": "chrome"}},
+                {"action": "browser_control", "resource": "new_tab", "device": "local", "parameters": {"browser": "chrome", "resource": "new_tab"}},
+                {"action": "search", "resource": "web", "device": "local", "parameters": {"query": "youtube"}},
+                {"action": "open", "resource": "chrome", "device": "local", "parameters": {"name": "chrome"}},
+                {"action": "browser_control", "resource": "new_tab", "device": "local", "parameters": {"browser": "chrome", "resource": "new_tab"}},
+                {"action": "explain_suggestion", "resource": "search", "device": "local", "parameters": {"target": "search"}},
+            ],
+        ):
+            with patch.object(agent.planner_engine, "build_plan", side_effect=lambda action: [dict(action, step=1)]):
+                for command in commands:
+                    agent.process(command)
+
+                self.assertEqual(
+                    agent.get_suggestion(),
+                    "You usually search after opening chrome. Want me to search something?",
+                )
+                self.assertEqual(
+                    agent.process("why did you suggest search"),
+                    "Because after opening chrome, your next step is usually search youtube.",
+                )
 
     def test_agent_loop_normalizes_before_executor(self):
         agent = AgentLoop()
@@ -948,6 +1165,24 @@ class ShreeFeatureTests(unittest.TestCase):
 
         stored = json.loads(memory_path.read_text(encoding="utf-8"))
         self.assertEqual(stored, [])
+
+    def test_agent_loop_updates_runtime_context_after_successful_execution(self):
+        agent = AgentLoop()
+        agent.plugin_manager.plugins["open"] = DummyOpenPlugin()
+        agent.plugin_manager.plugins["browser_control"] = DummyBrowserControlPlugin()
+
+        agent.process("open chrome")
+        agent.process("open new tab")
+
+        self.assertEqual(agent.context_manager.get_active_app(), "chrome")
+        self.assertEqual(agent.context_manager.get_last_action(), "browser_control")
+        self.assertEqual(
+            agent.context_manager.get_session(),
+            [
+                {"action": "open", "resource": "chrome"},
+                {"action": "browser_control", "resource": "new_tab"},
+            ],
+        )
 
     def test_open_file_plugin_opens_supported_file_when_found(self):
         base_path = ROOT / ".codex_tmp" / f"open_file_test_{uuid.uuid4().hex}"
@@ -1075,5 +1310,66 @@ class ShreeFeatureTests(unittest.TestCase):
         mock_send.assert_called_once_with("next")
 
 
+class TestLogResultWriter:
+    """Writes test results to a log file in reports/tests folder."""
+    
+    def __init__(self, log_path):
+        self.log_path = Path(log_path)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.results = []
+    
+    def add_result(self, test_name, status, error_msg=None):
+        self.results.append({
+            "test": test_name,
+            "status": status,
+            "error": error_msg
+        })
+    
+    def write(self):
+        with open(self.log_path, "w", encoding="utf-8") as f:
+            for result in self.results:
+                error_part = f"\n  Error: {result['error']}" if result['error'] else ""
+                f.write(f"[{result['status']}] {result['test']}{error_part}\n")
+
+
+class TestResultCollector(unittest.TestResult):
+    """Custom test result class that collects results for logging."""
+    
+    log_writer = None
+    
+    def __init__(self, stream, descriptions, verbosity, durations=None):
+        super().__init__(stream, descriptions, verbosity)
+        if durations is not None:
+            self.durations = durations
+    
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        if self.log_writer:
+            self.log_writer.add_result(str(test), "PASS")
+    
+    def addError(self, test, err):
+        super().addError(test, err)
+        if self.log_writer:
+            error_msg = f"{err[0].__name__}: {err[1]}"
+            self.log_writer.add_result(str(test), "ERROR", error_msg)
+    
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        if self.log_writer:
+            error_msg = f"{err[0].__name__}: {err[1]}"
+            self.log_writer.add_result(str(test), "FAIL", error_msg)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    log_file = ROOT / "reports" / "tests" / "test-log"
+    log_writer = TestLogResultWriter(log_file)
+    TestResultCollector.log_writer = log_writer
+    
+    loader = unittest.TestLoader()
+    suite = loader.loadTestsFromTestCase(ShreeFeatureTests)
+    runner = unittest.TextTestRunner(resultclass=TestResultCollector)
+    result = runner.run(suite)
+    
+    log_writer.write()
+    
+    exit(0 if result.wasSuccessful() else 1)

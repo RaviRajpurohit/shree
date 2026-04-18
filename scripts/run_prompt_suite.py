@@ -49,6 +49,8 @@ TEST_CATEGORIES = [
         "Edge Cases",
         [
             "open chrom",
+            "open calcy",
+            "open clcy",
             "open calculater",
             "open notpad",
             "play musc",
@@ -80,6 +82,7 @@ TEST_CATEGORIES = [
         [
             "search python tutorial",
             "please search for ai tutorial",
+            "search youtube",
         ],
     ),
     (
@@ -98,6 +101,7 @@ TEST_CATEGORIES = [
             "execute dir",
             "type cls",
             "ls",
+            "run ls",
         ],
     ),
     (
@@ -118,6 +122,7 @@ TEST_CATEGORIES = [
             "open chrome and search ai tutorial",
             "open chrome with new tab",
             "open chrome then new tab",
+            "search python tutorial",
         ],
     ),
     (
@@ -125,6 +130,7 @@ TEST_CATEGORIES = [
         [
             "open chrome",
             "open new tab",
+            "open tab",
             "play bhajan",
             "play next",
         ],
@@ -133,7 +139,7 @@ TEST_CATEGORIES = [
         "History And Explainability",
         [
             "show my last commands",
-            "why did you suggest chrome",
+            "why did you suggest search",
             "explain suggestion",
         ],
     ),
@@ -147,7 +153,14 @@ TEST_CATEGORIES = [
     ),
 ]
 
-SUGGESTION_SEQUENCE = ["open cmd", "open cmd", "open cmd", "hello"]
+SUGGESTION_SEQUENCE = [
+    "open chrome",
+    "open new tab",
+    "search youtube",
+    "open chrome",
+    "open new tab",
+    "why did you suggest search",
+]
 
 
 class SnapshotOpenAppPlugin(OpenAppPlugin):
@@ -323,18 +336,25 @@ def build_snapshot_agent():
 
 
 def resolve_command_snapshot(agent, command):
-    offline_response = agent.offline_knowledge_engine.respond(command)
+    normalized_command = agent.normalization_engine.normalize(command)
+    offline_response = agent.offline_knowledge_engine.respond(normalized_command)
 
     if offline_response:
         return {
             "source": "offline_knowledge",
             "action": "offline_response",
-            "resource": normalize_text_for_report(command),
+            "resource": normalize_text_for_report(normalized_command),
+            "normalized_command": normalized_command,
             "plan": [],
             "response": offline_response,
+            "context": {
+                "active_app": agent.context_manager.get_active_app(),
+                "last_action": agent.context_manager.get_last_action(),
+                "session": agent.context_manager.get_session(),
+            },
         }
 
-    action_schema = normalize(agent.intent_router.route(command))
+    action_schema = normalize(agent.intent_router.route(normalized_command))
     plan = []
 
     if action_schema and not is_non_executable_action(action_schema):
@@ -346,8 +366,14 @@ def resolve_command_snapshot(agent, command):
         "source": get_result_source(action_schema),
         "action": get_result_action(action_schema),
         "resource": get_result_resource(action_schema),
+        "normalized_command": normalized_command,
         "plan": plan,
         "response": response,
+        "context": {
+            "active_app": agent.context_manager.get_active_app(),
+            "last_action": agent.context_manager.get_last_action(),
+            "session": agent.context_manager.get_session(),
+        },
     }
 
 
@@ -358,11 +384,13 @@ def run_test_case(agent, command):
 
     return {
         "command": command,
+        "normalized_command": snapshot["normalized_command"],
         "source": snapshot["source"],
         "action": snapshot["action"],
         "resource": snapshot["resource"],
         "plan": snapshot["plan"],
         "response": snapshot["response"],
+        "context": snapshot["context"],
         "suggestion_before": suggestion_before,
         "suggestion_after": suggestion_after,
     }
@@ -431,6 +459,8 @@ def classify_result(result):
         or "i can help with offline commands" in response
         or "recent commands:" in response
         or "because you " in response
+        or "because after " in response
+        or "want me to search something?" in response
     ):
         return "success"
 
@@ -479,6 +509,26 @@ def format_plan_steps(plan):
     return lines
 
 
+def format_context_lines(context):
+    if not context:
+        return ["- Context after: None"]
+
+    active_app = context.get("active_app") or "None"
+    last_action = context.get("last_action") or "None"
+    session = context.get("session") or []
+    session_summary = ", ".join(
+        f"{item.get('action')}:{item.get('resource')}"
+        for item in session
+    ) or "None"
+
+    return [
+        "- Context after:",
+        "  " + f"active_app={active_app}",
+        "  " + f"last_action={last_action}",
+        "  " + f"session={session_summary}",
+    ]
+
+
 def build_report(results, suggestion_results, report_path):
     status_counter = Counter(classify_result(result) for result in results)
     category_counter = Counter(result["category"] for result in results)
@@ -523,10 +573,12 @@ def build_report(results, suggestion_results, report_path):
                 [
                     f"#### {result['command']}",
                     "",
+                    f"- Normalized command: {result['normalized_command']}",
                     f"- Source: {result['source']}",
                     f"- Action: {result['action']}",
                     f"- Resource: {result['resource']}",
                     *format_plan_steps(result["plan"]),
+                    *format_context_lines(result["context"]),
                     f"- Suggestion before: {result['suggestion_before'] or 'None'}",
                     f"- Response: {result['response']}",
                     f"- Suggestion after: {result['suggestion_after'] or 'None'}",
@@ -552,7 +604,9 @@ def build_report(results, suggestion_results, report_path):
             [
                 f"### {result['command']}",
                 "",
+                f"- Normalized command: {result['normalized_command']}",
                 *format_plan_steps(result["plan"]),
+                *format_context_lines(result["context"]),
                 f"- Suggestion before: {result['suggestion_before'] or 'None'}",
                 f"- Response: {result['response']}",
                 f"- Suggestion after: {result['suggestion_after'] or 'None'}",

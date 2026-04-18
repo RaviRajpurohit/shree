@@ -1,7 +1,7 @@
 class SuggestionEngine:
-    FREQUENT_ACTION_THRESHOLD = 3
-    REPEATED_SEQUENCE_THRESHOLD = 2
-    SEQUENCE_LENGTH = 3
+    SESSION_WINDOW = 5
+    MIN_PATTERN_SUPPORT = 2
+    CONTEXT_LENGTHS = (2, 1)
 
     def __init__(self, memory, memory_manager):
         self.memory = memory
@@ -23,83 +23,92 @@ class SuggestionEngine:
         self.latest_suggestion = None
 
     def _build_suggestion(self):
-        sequence_suggestion = self._build_repeated_sequence_suggestion()
+        payload = self._build_next_action_suggestion()
 
-        if sequence_suggestion:
-            return self._publish_suggestion(sequence_suggestion)
-
-        frequent_action_suggestion = self._build_frequent_action_suggestion()
-
-        if frequent_action_suggestion:
-            return self._publish_suggestion(frequent_action_suggestion)
+        if payload:
+            return self._publish_suggestion(payload)
 
         self.memory.last_suggestion_reason = None
+        self.latest_suggestion = None
         return None
 
-    def _build_frequent_action_suggestion(self):
-        top_actions = self.memory_manager.get_top_actions()
-
-        if not top_actions:
-            return None
-
-        top_action = top_actions[0]
-        count = top_action.get("count", 0)
-
-        if count < self.FREQUENT_ACTION_THRESHOLD:
-            return None
-
-        command = self._format_action_command(top_action)
-        suggestion = f"You usually {command}. Want me to?"
-        reason = f"Because you used '{command}' {count} times recently"
-
-        if top_action.get("action") == "open" and top_action.get("resource"):
-            reason = f"Because you opened {top_action['resource']} {count} times recently"
-
-        return {
-            "key": f"frequent:{top_action.get('action')}:{top_action.get('resource')}",
-            "command": command,
-            "strength": count,
-            "suggestion": suggestion,
-            "reason": reason,
-        }
-
-    def _build_repeated_sequence_suggestion(self):
+    def _build_next_action_suggestion(self):
         records = self.memory.command_history
 
-        if len(records) < self.SEQUENCE_LENGTH * self.REPEATED_SEQUENCE_THRESHOLD:
+        if len(records) < 3:
             return None
 
-        last_sequence = [
-            self._sequence_signature(record)
-            for record in records[-self.SEQUENCE_LENGTH :]
-        ]
+        recent_records = records[-self.SESSION_WINDOW :]
 
-        prior_signatures = [
-            self._sequence_signature(record)
-            for record in records[:-self.SEQUENCE_LENGTH]
-        ]
+        for context_length in self.CONTEXT_LENGTHS:
+            if len(recent_records) < context_length:
+                continue
 
-        repeats = 1
+            context_records = recent_records[-context_length:]
+            context_signature = [self._sequence_signature(record) for record in context_records]
+            matches = self._find_next_action_matches(records, context_signature)
 
-        for start_index in range(len(prior_signatures) - self.SEQUENCE_LENGTH + 1):
-            if prior_signatures[start_index : start_index + self.SEQUENCE_LENGTH] == last_sequence:
-                repeats += 1
+            if not matches:
+                continue
 
-        if repeats < self.REPEATED_SEQUENCE_THRESHOLD:
-            return None
+            best_match = max(matches, key=lambda item: (item["count"], item["next_command"]))
 
-        command_steps = [
-            self._format_history_record(record)
-            for record in records[-self.SEQUENCE_LENGTH :]
-        ]
-        command = " then ".join(command_steps)
-        suggestion = f"You often {command}. Want me to do that?"
-        reason = f"Because you often follow this pattern: {', then '.join(command_steps)}"
+            if best_match["count"] < self.MIN_PATTERN_SUPPORT:
+                continue
+
+            if best_match["next_signature"] == context_signature[-1]:
+                continue
+
+            return self._build_payload(context_records, best_match)
+
+        return None
+
+    def _find_next_action_matches(self, records, context_signature):
+        context_length = len(context_signature)
+        cutoff_index = len(records) - context_length
+        matches = {}
+
+        for start_index in range(cutoff_index):
+            end_index = start_index + context_length
+
+            if end_index >= len(records):
+                break
+
+            candidate_context = [
+                self._sequence_signature(record)
+                for record in records[start_index:end_index]
+            ]
+
+            if candidate_context != context_signature:
+                continue
+
+            next_record = records[end_index]
+            next_signature = self._sequence_signature(next_record)
+
+            if next_signature not in matches:
+                matches[next_signature] = {
+                    "count": 0,
+                    "record": next_record,
+                    "next_signature": next_signature,
+                    "next_command": self._format_history_record(next_record),
+                }
+
+            matches[next_signature]["count"] += 1
+
+        return list(matches.values())
+
+    def _build_payload(self, context_records, match):
+        next_record = match["record"]
+        next_command = match["next_command"]
+        suggested_command = self._format_suggestion_command(next_record)
+        context_summary = self._summarize_context(context_records)
+        suggestion = self._build_suggestion_text(next_record, context_summary, next_command)
+        reason = f"Because after {context_summary}, your next step is usually {next_command}."
 
         return {
-            "key": f"sequence:{'|'.join(last_sequence)}",
-            "command": command,
-            "strength": repeats,
+            "key": f"next:{'|'.join(self._sequence_signature(record) for record in context_records)}->{match['next_signature']}",
+            "command": suggested_command,
+            "strength": match["count"],
             "suggestion": suggestion,
             "reason": reason,
         }
@@ -133,29 +142,51 @@ class SuggestionEngine:
             ]
         )
 
+    def _summarize_context(self, context_records):
+        if not context_records:
+            return "that"
+
+        primary_record = None
+
+        for record in context_records:
+            if record.get("action") == "open" and record.get("resource"):
+                primary_record = record
+                break
+
+        if primary_record:
+            return f"opening {primary_record.get('resource')}"
+
+        return self._format_history_record(context_records[-1])
+
+    def _build_suggestion_text(self, next_record, context_summary, next_command):
+        action = next_record.get("action")
+
+        if action == "search":
+            return f"You usually search after {context_summary}. Want me to search something?"
+
+        if action == "browser_control" and next_record.get("resource") == "new_tab":
+            return f"You usually open a tab after {context_summary}. Want me to?"
+
+        if action == "open" and next_record.get("resource"):
+            return f"You usually open {next_record['resource']} after {context_summary}. Want me to?"
+
+        return f"You usually {next_command} after {context_summary}. Want me to?"
+
     @staticmethod
-    def _format_action_command(record):
+    def _format_suggestion_command(record):
         action = record.get("action")
         resource = record.get("resource", "")
-
-        if action == "open" and resource:
-            return f"open {resource}"
-
-        if action == "browser_control":
-            if resource == "new_tab":
-                return "open new tab"
-            if resource == "next_tab":
-                return "go to the next tab"
-            if resource == "previous_tab":
-                return "go to the previous tab"
 
         if action == "search":
             return "search"
 
-        if action == "play_music" and resource:
-            return f"play {resource}"
+        if action == "browser_control" and resource == "new_tab":
+            return "open new tab"
 
-        return " ".join(part for part in [action, resource] if part).strip()
+        if action == "open" and resource:
+            return f"open {resource}"
+
+        return SuggestionEngine._format_history_record(record)
 
     @staticmethod
     def _format_history_record(record):
@@ -176,7 +207,7 @@ class SuggestionEngine:
 
         if action == "search":
             query = parameters.get("query", "").strip()
-            return f"search {query}".strip()
+            return f"search {query}".strip() or "search"
 
         if action == "play_music":
             target = (parameters.get("name") or resource or "").strip()
