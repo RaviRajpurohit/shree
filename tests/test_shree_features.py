@@ -166,8 +166,8 @@ class ShreeFeatureTests(unittest.TestCase):
         self.assertEqual(len(plan), 2)
         self.assertEqual(plan[0]["step"], 1)
         self.assertEqual(plan[0]["action"], "open")
-        self.assertEqual(plan[0]["resource"], "chrome")
-        self.assertEqual(plan[0]["parameters"]["name"], "chrome")
+        self.assertEqual(plan[0]["resource"], "edge")
+        self.assertEqual(plan[0]["parameters"]["name"], "edge")
         self.assertEqual(plan[1]["step"], 2)
         self.assertEqual(plan[1]["action"], "search")
 
@@ -178,9 +178,9 @@ class ShreeFeatureTests(unittest.TestCase):
             [
                 {
                     "action": "open",
-                    "resource": "chrome",
+                    "resource": "edge",
                     "device": "local",
-                    "parameters": {"name": "chrome"},
+                    "parameters": {"name": "edge"},
                 },
                 {
                     "action": "search",

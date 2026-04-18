@@ -6,7 +6,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class PlannerEngine:
-    DEFAULT_BROWSER = "chrome"
+    DEFAULT_BROWSER = "edge"
 
     def build_plan(self, action_schema):
         if not action_schema:
